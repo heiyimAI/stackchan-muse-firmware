@@ -15,7 +15,7 @@
 # Default target: ESP32-C5 (RISC-V, Wi-Fi 6), the chip in Muse Home Link.
 # Board overlays in devices/ select other targets.
 CONFIG_IDF_TARGET="esp32c5"
-CONFIG_ESP32C5_REV_MAX_FULL=199
+# CONFIG_ESP32C5_REV_MAX_FULL=199
 # C5 max CPU is 240 MHz.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
@@ -139,7 +139,7 @@ CONFIG_ESP_TLS_USING_MBEDTLS=y
 # Release overlays opt into deterministic eFuse ECDSA for official v5 pairing.
 # The production fleet scalar is shared, so deterministic signing is mandatory.
 CONFIG_HOMEHUB_PAIRING_EFUSE_AUTH=n
-CONFIG_MBEDTLS_HARDWARE_ECDSA_SIGN=y
+# CONFIG_MBEDTLS_HARDWARE_ECDSA_SIGN=y # disabled in v6.0.1
 CONFIG_MBEDTLS_ECDSA_DETERMINISTIC=y
 
 # Main task stack (TLS handshake is hungry).
