@@ -52,4 +52,5 @@ __pycache__/
 .gradle/
 .idea/
 local.properties
-esp32/sdkconfig.defaults.bak
+sdkconfig.defaults.bak
+compile_commands.json
