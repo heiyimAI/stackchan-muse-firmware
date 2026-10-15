@@ -169,12 +169,13 @@ static bool post_attempt(const int16_t *pcm, size_t frames, char *resp, size_t c
     }
     esp_http_client_fetch_headers(s_client);
     int status = esp_http_client_get_status_code(s_client);
-    int n = read_body(resp, cap);
-    *resp_len = n < 0 ? 0 : n;
+    int n = read_body(resp, cap);   /* drained either way, or the kept connection goes stale */
     if (status != 200) {
         ESP_LOGW(TAG, "STT HTTP %d: %.120s", status, resp);
-        return true;   /* a response arrived; the caller reads the status via resp_len==0 path */
+        *resp_len = 0;   /* what came back is the error, not a transcript */
+        return true;
     }
+    *resp_len = n < 0 ? 0 : n;
     return true;
 }
 
@@ -256,12 +257,16 @@ static void do_transcribe(void)
     }
     s_ok = ok;
     s_resp_id = id;
+    int ms = (int)((esp_timer_get_time() - t0) / 1000);
     if (ok) {
-        ESP_LOGI(TAG, "transcript in %d ms: \"%s\"",
-                 (int)((esp_timer_get_time() - t0) / 1000), s_result);
+        ESP_LOGI(TAG, "transcript in %d ms: \"%s\"", ms, s_result);
+    } else if (rn > 0) {
+        /* The proxy answered — there was simply nothing in the note to
+         * transcribe. Not a failure to go looking for, and the caption the
+         * caller shows ("DIDN'T CATCH THAT") is the right one. */
+        ESP_LOGW(TAG, "no speech in the note: the proxy sent an empty transcript (%d ms)", ms);
     } else {
-        ESP_LOGW(TAG, "transcribe failed after %d ms",
-                 (int)((esp_timer_get_time() - t0) / 1000));
+        ESP_LOGW(TAG, "transcribe failed after %d ms", ms);
     }
 }
 

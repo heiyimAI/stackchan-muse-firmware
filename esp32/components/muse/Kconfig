@@ -261,4 +261,84 @@ menu "Muse"
             only answers. Off: the voice note goes to Muse, as upstream does,
             and Muse transcribes it.
 
+    # The voice-detection block below sets how a note that no finger releases
+    # ends: a wake word or any other voice-triggered turn. Push-to-talk is
+    # unaffected — the button decides when a note ends.
+
+    config MUSE_VAD_DROP_DB
+        int "Speech end: dB below the speech peak"
+        depends on MUSE_HATCH
+        range 6 40
+        default 18
+        help
+            A chunk under (the loudest chunk of the note - this) is silence.
+            Too small and a normal pause in speech ends the note early; too
+            large and the note runs on through the room's noise. This is the
+            usual end-of-speech hangover of 10-20 dB.
+
+    config MUSE_VAD_FLOOR_DB
+        int "Speech end: absolute floor (negative dBFS)"
+        depends on MUSE_HATCH
+        range -80 -30
+        default -45
+        help
+            The threshold above never drops below this, so the room's noise
+            floor cannot count as speech — which, in most rooms, is what this
+            setting really is: the level a voice has to beat. Too low and the
+            room talks over the speaker; too high and a soft voice is never
+            heard at all.
+
+            Measured on a CoreS3 at the default 30 dB mic gain: a voice reads
+            about -40 dBFS over a whole note (rms), and the room between its
+            words -52 to -68 dBFS. This default sits in that gap. Every
+            voice-triggered note logs the two numbers to compare —
+                muse_voice: voice: peak X dBFS, threshold Y dBFS, armed
+            where Y is this floor until the peak outgrows it (-27 dBFS and
+            louder), and only chunks that reach Y count as speech at all.
+
+    config MUSE_VAD_MIN_SPEECH_CHUNKS
+        int "Speech chunks before the end can fire (20 ms each)"
+        depends on MUSE_HATCH
+        range 1 100
+        default 15
+        help
+            300 ms of speech, counted in all rather than in a row: the dip
+            between two words must not keep a quiet speaker from ever arming,
+            which would run their note to the 15 s cap. Until this much has
+            been heard, silence cannot end the note — a cough, a door, or the
+            wake phrase's own beep cannot cut a note short before it begins.
+
+    config MUSE_VAD_SILENCE_CHUNKS
+        int "Silent chunks that end the note (20 ms each)"
+        depends on MUSE_HATCH
+        range 1 150
+        default 15
+        help
+            300 ms of silence ends the note. This is added latency at the end
+            of every turn; shortening it makes the robot feel quicker to
+            answer and risks clipping the last word.
+
+    config MUSE_VAD_NO_SPEECH_MS
+        int "Voice-triggered turn abandoned after (ms of no speech)"
+        depends on MUSE_HATCH
+        range 1000 30000
+        default 5000
+        help
+            A wake word that caught something other than a person — a
+            television, a cough — must not sit recording for the full 15 s
+            cap with the mic light on. After this long with nothing above the
+            floor, the turn is cancelled with the usual DIDN'T CATCH THAT.
+            Push-to-talk ignores this: a held button means intent.
+
+    config MUSE_VAD_PREROLL_CHUNKS
+        int "Audio kept from before the trigger (20 ms each)"
+        depends on MUSE_HATCH
+        range 0 25
+        default 4
+        help
+            80 ms of the ring buffer is kept when a voice-triggered turn
+            begins, so the first syllable after the wake word is not clipped
+            while the trigger travels to the voice task. The wake phrase
+            itself is discarded with the rest of the ring.
+
 endmenu

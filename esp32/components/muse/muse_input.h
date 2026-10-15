@@ -41,6 +41,7 @@ typedef enum {
 typedef struct {
     muse_ptt_t type;
     bool wake;   /* a press that woke the screen: a tap only wakes */
+    bool voice;  /* a wake word's press: the note ends on speech, not a finger */
 } muse_input_event_t;
 
 /*
@@ -56,8 +57,17 @@ void muse_input_power_init(void);
 /* Whether the CPU powers down in light sleep (muse_input_power_init() got its memory). */
 bool muse_input_cpu_pd(void);
 
-/* PTT events are posted to `queue` (items are muse_input_event_t). */
+/* PTT events are posted to `queue` (items are muse_input_event_t). The
+ * `voice` flag is only ever set on events from muse_input_voice_trigger(). */
 esp_err_t muse_input_start(QueueHandle_t queue);
+
+/*
+ * Starts a turn with no finger involved — the wake word's path, and the `v`
+ * bench key. Wakes the screen (as a press does, without the tap-only rule)
+ * and posts a press marked `voice`, so the voice task records with the note
+ * ending on silence instead of a release. Safe to call from any task.
+ */
+void muse_input_voice_trigger(const char *why);
 
 /* LVGL microphone press/release edges; handled by the existing input task. */
 void muse_input_touch_talk(bool pressed);

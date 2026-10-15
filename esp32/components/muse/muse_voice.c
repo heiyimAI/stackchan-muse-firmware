@@ -39,6 +39,7 @@
 #ifdef CONFIG_MUSE_STT_VOICEPROXY
 #include "muse_stt_voiceproxy.h"
 #endif
+#include "muse_vad.h"
 #include "muse_wifi.h"
 
 static const char *TAG = "muse_voice";
@@ -47,6 +48,27 @@ static const char *TAG = "muse_voice";
 #define TAIL_FRAMES (MUSE_AUDIO_RATE * 12 / 100)   /* capture lag + poll interval, stops before the release click */
 #define MAX_FRAMES (MUSE_AUDIO_RATE * MAX_SECS)
 #define MIN_HELD_FRAMES (MUSE_AUDIO_RATE * 3 / 10)   /* shorter presses are taps, not speech */
+
+/*
+ * The speech-end detector's numbers, from Kconfig where the Hatch build
+ * provides them (its menu is where they're documented). The fallbacks are
+ * those same defaults, so a build without them still records voice turns.
+ */
+#ifdef CONFIG_MUSE_VAD_DROP_DB
+#define VAD_DROP_DB ((float)CONFIG_MUSE_VAD_DROP_DB)
+#define VAD_FLOOR_DB ((float)CONFIG_MUSE_VAD_FLOOR_DB)
+#define VAD_MIN_SPEECH_CHUNKS CONFIG_MUSE_VAD_MIN_SPEECH_CHUNKS
+#define VAD_SILENCE_CHUNKS CONFIG_MUSE_VAD_SILENCE_CHUNKS
+#define VAD_NO_SPEECH_MS CONFIG_MUSE_VAD_NO_SPEECH_MS
+#define VAD_PREROLL_CHUNKS CONFIG_MUSE_VAD_PREROLL_CHUNKS
+#else
+#define VAD_DROP_DB 18.0f
+#define VAD_FLOOR_DB (-45.0f)
+#define VAD_MIN_SPEECH_CHUNKS 15
+#define VAD_SILENCE_CHUNKS 15
+#define VAD_NO_SPEECH_MS 5000
+#define VAD_PREROLL_CHUNKS 4
+#endif
 #if CONFIG_MUSE_BOARD_M5STACK_CARDPUTER_ADV || CONFIG_MUSE_BOARD_AI_PASSPORT
 #define PRE_CHUNKS 6                                   /* 120 ms; a 320 ms upload burst stalls on the ADV and C3 */
 #else
@@ -142,6 +164,19 @@ static void pre_reset(void)
     s_settle = SETTLE_CHUNKS;
 }
 
+/*
+ * Keeps only the newest `chunks` of the pre-roll — for a voice-triggered
+ * turn, whose ring holds the wake phrase (and whatever the room was doing
+ * while it was said). Not pre_reset(): that would also drop the first
+ * chunks after the trigger, which are the ones the note needs.
+ */
+static void pre_keep(size_t chunks)
+{
+    if (s_pre_fill > chunks) {
+        s_pre_fill = chunks;
+    }
+}
+
 /* One 20 ms idle read: feeds the pre-roll ring and the settings mic meter. */
 static void idle_capture(void)
 {
@@ -186,6 +221,7 @@ typedef struct {
     size_t frames;
     int peak, clipped;
     float floor_db;
+    float last_db;       /* the newest full chunk's level: what the VAD steps on */
     float tail_db[25];   /* the last 0.5 s, to see where speech ends and the release click lands */
     size_t chunks;
 } rec_stats_t;
@@ -202,6 +238,7 @@ static void keep(rec_stats_t *st, const int16_t *pcm, size_t n)
     st->frames += n;
     if (n == MUSE_AUDIO_CHUNK) {
         float db = muse_audio_dbfs(pcm, n);
+        st->last_db = db;
         st->floor_db = db < st->floor_db ? db : st->floor_db;
         st->tail_db[st->chunks++ % 25] = db;
     }
@@ -249,15 +286,21 @@ static void take(rec_stats_t *st, const int16_t *pcm)
     feed_live();
 }
 
+static void drop_rec(void);
+
 /*
  * Records speech until release or MAX_SECS, starting with the pre-roll; *held
  * gets the part after the press. It streams to Hatch as it goes if it can.
  * If not, the note is kept in s_rec to send later, and streams from partway
- * if Hatch comes within reach. Returns false if Hatch failed the turn with no
- * kept note to fall back on (why says what failed). There is no start chirp:
- * anything played now would land on top of the first words.
+ * if Hatch comes within reach. `voice` is a turn with no finger holding it
+ * open (a wake word's): the note ends on the VAD once the speech has stopped,
+ * and a turn where nothing is said at all is abandoned rather than recorded
+ * to the cap. Returns false if Hatch failed the turn with no kept note to
+ * fall back on, or if a voice turn was abandoned (why says what happened).
+ * There is no start chirp: anything played now would land on top of the
+ * first words.
  */
-static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+static bool record(bool barge_in, bool voice, size_t *held, char *why, size_t cap)
 {
     muse_state_set_mode(MUSE_MODE_LISTENING);
     muse_state_set_progress(0);
@@ -276,6 +319,14 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     bool gave_up = false;   /* Hatch failed this note: it's kept, and goes later */
     char text[96];
     rec_stats_t st = { 0 };
+    muse_vad_t vad = { .drop_db = VAD_DROP_DB, .floor_db = VAD_FLOOR_DB,
+                       .min_speech_chunks = VAD_MIN_SPEECH_CHUNKS,
+                       .silence_chunks = VAD_SILENCE_CHUNKS };
+    muse_vad_reset(&vad);
+    /* Talking to a wake word is not the same as holding a button: nobody is
+     * standing there to end the note, and nobody said there would be speech. */
+    const size_t no_speech_frames = (size_t)MUSE_AUDIO_RATE * VAD_NO_SPEECH_MS / 1000;
+    bool abandoned = false;
 
     size_t n = 0;
     if (barge_in) {
@@ -338,9 +389,24 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          * Capture runs 60-80 ms behind real time and people let go on their
          * last syllable, so keep going briefly after release.
          */
-        if (!released && got_event(MUSE_PTT_UP)) {
-            released = true;
-            stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
+        if (!released) {
+            bool up = got_event(MUSE_PTT_UP);
+            bool speech_over = voice && muse_vad_step(&vad, st.last_db);
+            if (up || speech_over) {
+                released = true;
+                stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
+                if (speech_over && !up) {
+                    ESP_LOGI(TAG, "voice: speech ended at %.1f dBFS after %.1fs",
+                             st.last_db, (double)n / MUSE_AUDIO_RATE);
+                }
+            } else if (voice && !vad.armed && n >= no_speech_frames) {
+                /* Not `spoke`: a single spike over the floor — a click, a
+                 * door — would turn that off for the rest of the note, and
+                 * the note would then run to the cap. Armed means 300 ms of
+                 * speech in all, which scattered clicks never reach. */
+                abandoned = true;
+                break;
+            }
         }
     }
     muse_state_set_level(0);
@@ -357,6 +423,24 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     ESP_LOGI(TAG, "recorded %.2fs%s: rms %.1f dBFS, peak %.1f dBFS, floor %.1f dBFS, %d clipped, gain %d dB",
              (double)n / MUSE_AUDIO_RATE, released ? "" : " (max)", rms_db < -100.0f ? -100.0f : rms_db,
              20.0 * log10((st.peak + 1) / 32768.0), st.floor_db, st.clipped, muse_settings_mic_gain());
+    if (voice) {
+        /* What the detector saw, so the floor can be tuned to the room:
+         * `armed` means enough speech crossed the threshold to let the note
+         * end by itself, and a note that never arms is abandoned. */
+        ESP_LOGI(TAG, "voice: peak %.1f dBFS, threshold %.1f dBFS, %s",
+                 vad.peak_db, muse_vad_threshold(&vad),
+                 vad.armed ? "armed" : vad.spoke ? "peaks only" : "all below the floor");
+    }
+    if (abandoned) {
+        /* The wake word heard something that wasn't a person, or the mic is
+         * dead: either way there is no note to send, and no reason to sit
+         * here for the rest of the cap. The caller drops it and says so. */
+        ESP_LOGI(TAG, "voice: nothing said in %.1fs, giving up", (double)n / MUSE_AUDIO_RATE);
+        muse_hatch_turn_cancel();
+        drop_rec();   /* its buffer is half a megabyte of PSRAM: free it here */
+        strlcpy(why, "DIDN'T CATCH THAT", cap);
+        return false;
+    }
     return ok;
 }
 
@@ -843,6 +927,7 @@ static void voice_task(void *arg)
     muse_audio_selftest();
     for (;;) {
         bool wake = false;
+        bool voice = false;   /* the press came from a wake word, not a finger */
         if (!pending_down) {
             muse_input_event_t ev;
             bool asleep = muse_state_asleep();
@@ -904,6 +989,7 @@ static void voice_task(void *arg)
                 continue;
             }
             wake = ev.wake;
+            voice = ev.voice;
         }
         if (wake && !held_on_waking()) {
             continue;   /* a tap: it only woke Muse */
@@ -913,11 +999,16 @@ static void voice_task(void *arg)
             pending_down = false;
             continue;
         }
+        if (voice) {
+            /* The wake phrase is not part of the note; the last few chunks of
+             * the ring are, in case the trigger point clipped the first one. */
+            pre_keep(VAD_PREROLL_CHUNKS);
+        }
         size_t held;
         char why[96];
-        bool ok = record(pending_down, &held, why, sizeof(why));
+        bool ok = record(pending_down, voice, &held, why, sizeof(why));
         pending_down = false;
-        if (held < MIN_HELD_FRAMES && !wake) {
+        if (held < MIN_HELD_FRAMES && !wake && !voice) {
             muse_hatch_turn_cancel();
             drop_rec();
             pre_reset();

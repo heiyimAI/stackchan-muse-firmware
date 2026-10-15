@@ -90,7 +90,7 @@ static volatile bool s_nap_now;   /* ">nap": asleep, as if on battery, nap witho
 
 static void post(muse_ptt_t type, bool wake)
 {
-    muse_input_event_t ev = { .type = type, .wake = wake };
+    muse_input_event_t ev = { .type = type, .wake = wake, .voice = false };
     ESP_LOGI(TAG, "PTT %s%s", type == MUSE_PTT_DOWN ? "down" : "up", wake ? " (waking)" : "");
     xQueueSend(s_queue, &ev, 0);
 }
@@ -135,6 +135,17 @@ static void set_asleep(bool asleep, const char *why)
             muse_wifi_apply();   /* the screen says reconnecting: don't sit out the backoff */
         }
     }
+}
+
+void muse_input_voice_trigger(const char *why)
+{
+    muse_input_event_t ev = { .type = MUSE_PTT_DOWN, .wake = false, .voice = true };
+    set_asleep(false, why);
+    if (!s_queue) {
+        return;   /* before muse_input_start: there is nothing to record with */
+    }
+    ESP_LOGI(TAG, "PTT down (voice)");
+    xQueueSend(s_queue, &ev, 0);
 }
 
 static void toggle_phone_setup(void)
@@ -772,8 +783,10 @@ static bool console_command(char *line, bool whole)
 /*
  * Bench testing over the USB cable: 'd' / 'u' act as the talk button going
  * down / up, so the voice path can be driven without a finger on the button;
- * 'm' plays a built-in MP3 through the reply decoder; 'a' / 's' press the
- * menu's Down / Select; 'p' sends a screenshot; 'z' / 'w' sleep and wake.
+ * 'v' is what a wake word does (muse_input_voice_trigger: the note opens and
+ * closes on the speech itself, with no release to send); 'm' plays a built-in
+ * MP3 through the reply decoder; 'a' / 's' press the menu's Down / Select;
+ * 'p' sends a screenshot; 'z' / 'w' sleep and wake.
  * A line starting with '>' is a setup command, the same "key=value" text as
  * the BLE CMD characteristic, or one of the console's own: "status" prints
  * the device's state, "power" the battery meter (muse_battery.h) and
@@ -812,6 +825,9 @@ static void serial_task(void *arg)
         } else if (c == 'd' || c == 'u') {
             muse_state_poke();
             post(c == 'd' ? MUSE_PTT_DOWN : MUSE_PTT_UP, false);
+        } else if (c == 'v') {
+            /* The whole voice-triggered turn, with no wake engine in it. */
+            muse_input_voice_trigger("serial");
         }
     }
 }
