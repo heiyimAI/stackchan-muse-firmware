@@ -353,6 +353,9 @@ bool muse_stt_voiceproxy_transcribe(const int16_t *pcm, size_t frames,
         }
         /* A late give from an abandoned request: keep waiting. */
     }
+    if (!ok && s_resp_id != id) {
+        ESP_LOGW(TAG, "wait timed out after %u ms", (unsigned)timeout_ms);
+    }
     s_pcm = NULL;
     s_frames = 0;
     xSemaphoreGive(s_lock);

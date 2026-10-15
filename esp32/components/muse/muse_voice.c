@@ -320,7 +320,13 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
         }
         n += MUSE_AUDIO_CHUNK;
         bool tick = n % (MUSE_AUDIO_CHUNK * 5) == 0;
-        if (tick && s_rec && !s_live && !gave_up && !s_held_count && muse_hatch_ready()) {
+#ifdef CONFIG_MUSE_STT_VOICEPROXY
+        /* STT mode keeps the note local; there is nothing to stream to Muse. */
+        bool live_ok = !muse_stt_voiceproxy_enabled();
+#else
+        bool live_ok = true;
+#endif
+        if (tick && live_ok && s_rec && !s_live && !gave_up && !s_held_count && muse_hatch_ready()) {
             ESP_LOGI(TAG, "Muse in reach: streaming the note so far");
             go_live();
         }
@@ -739,6 +745,8 @@ static bool finish_note(void)
      * failed transcription ends the turn. */
     if (muse_stt_voiceproxy_enabled()) {
         if (!s_rec || !s_rec_n) {
+            ESP_LOGW(TAG, "stt: nothing recorded (s_rec=%p frames=%u)",
+                     (void *)s_rec, (unsigned)s_rec_n);
             go_idle("DIDN'T CATCH THAT");
             return false;
         }
