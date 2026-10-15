@@ -36,6 +36,9 @@
 #include "muse_mem.h"
 #include "muse_settings.h"
 #include "muse_state.h"
+#ifdef CONFIG_MUSE_STT_VOICEPROXY
+#include "muse_stt_voiceproxy.h"
+#endif
 #include "muse_wifi.h"
 
 static const char *TAG = "muse_voice";
@@ -217,6 +220,14 @@ static void feed_live(void)
 /* Streams the note being recorded from its start, then the rest as it comes. */
 static void go_live(void)
 {
+#ifdef CONFIG_MUSE_STT_VOICEPROXY
+    /* STT mode: nothing goes to Muse during recording. The whole note stays
+     * in s_rec; after release it is transcribed on the voice-proxy and the
+     * transcript is injected as a turn (finish_note). */
+    if (muse_stt_voiceproxy_enabled()) {
+        return;
+    }
+#endif
     muse_hatch_turn_begin();
     s_live = s_tried = true;
     s_sent = 0;
@@ -255,6 +266,11 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     if (!s_rec || (muse_hatch_ready() && !s_held_count)) {
         go_live();
     }
+#ifdef CONFIG_MUSE_STT_VOICEPROXY
+    /* Open the transcription connection while the user talks, so the POST
+     * goes out the moment the note ends. */
+    muse_stt_voiceproxy_prewarm();
+#endif
     muse_state_set_caption(s_live ? "LISTENING..." : "RECORDING...");
     bool heard = false, ok = true;
     bool gave_up = false;   /* Hatch failed this note: it's kept, and goes later */
@@ -716,6 +732,33 @@ static bool held_due(void)
 static bool finish_note(void)
 {
     bool delivered;
+#ifdef CONFIG_MUSE_STT_VOICEPROXY
+    /* STT mode: transcribe the kept note on the voice-proxy and inject the
+     * transcript as a turn whose reply is captioned and spoken. The note
+     * goes nowhere else: the HOLD_NOTES retry machinery is bypassed, so a
+     * failed transcription ends the turn. */
+    if (muse_stt_voiceproxy_enabled()) {
+        if (!s_rec || !s_rec_n) {
+            go_idle("DIDN'T CATCH THAT");
+            return false;
+        }
+        muse_audio_chirp(0);
+        muse_state_set_mode(MUSE_MODE_THINKING);
+        muse_state_set_caption("TRANSCRIBING...");
+        char text[512];
+        bool ok = muse_stt_voiceproxy_transcribe(s_rec, s_rec_n, text, sizeof(text), 26000);
+        drop_rec();
+        if (!ok) {
+            go_idle("DIDN'T CATCH THAT");
+            return false;
+        }
+        if (!muse_chat_say_text(text)) {
+            go_idle("CAN'T REACH MUSE");
+            return false;
+        }
+        return hatch_reply(&delivered);
+    }
+#endif
 #if HOLD_NOTES
     if (s_rec) {
         bool fed = false, interrupted = false;

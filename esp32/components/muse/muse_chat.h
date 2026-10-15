@@ -109,6 +109,16 @@ bool muse_hatch_turn_caption(size_t played, char *out, size_t cap);
 /* Reply speech as 16 kHz mono. Waits up to wait_ms for some; returns frames read. */
 size_t muse_hatch_turn_read(int16_t *pcm, size_t frames, int wait_ms);
 
+/*
+ * Injects a transcript (e.g. from the voice-proxy STT) as a turn whose reply
+ * is captioned and spoken, unlike muse_hatch_text_turn() whose replies report
+ * to the console. Takes a copy of `text`. Returns false when nothing was
+ * queued — the caller fails the turn itself. Call from the voice task, then
+ * drain the turn with muse_hatch_turn_event()/muse_hatch_turn_read().
+ * CONFIG_MUSE_HATCH only.
+ */
+bool muse_chat_say_text(const char *text);
+
 /* Bench test: decodes a built-in MP3 to 16 kHz; caller frees *pcm. Returns frames. */
 size_t muse_hatch_mp3_selftest(int16_t **pcm);
 

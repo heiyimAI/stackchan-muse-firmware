@@ -236,7 +236,9 @@ menu "Muse"
         default ""
         help
             Base URL of the self-hosted voice-proxy (e.g. https://voice-proxy.example.com).
-            Empty disables voice-proxy TTS and falls back to silent caption pacing.
+            Feeds both the TTS hook (POST /v1/tts) and, with MUSE_STT_VOICEPROXY,
+            speech-to-text (POST /v1/stt). Empty disables both and falls back to
+            silent caption pacing / Muse-side transcription.
 
     config MUSE_TTS_VOICEPROXY_TOKEN
         string "Bearer token for voice-proxy"
@@ -247,5 +249,16 @@ menu "Muse"
         string "voice_id passed to voice-proxy (MiniMax voice alias)"
         depends on MUSE_HATCH
         default "Cantonese_GentleLady"
+
+    config MUSE_STT_VOICEPROXY
+        bool "Transcribe on the voice-proxy instead of Muse"
+        depends on MUSE_HATCH
+        default y
+        help
+            Push-to-talk records locally and posts the raw PCM to the
+            voice-proxy /v1/stt (lang=yue); the transcript is injected into
+            the chat as a turn whose reply is captioned and spoken. Muse then
+            only answers. Off: the voice note goes to Muse, as upstream does,
+            and Muse transcribes it.
 
 endmenu

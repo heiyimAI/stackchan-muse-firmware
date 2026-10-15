@@ -130,7 +130,7 @@ static const char *TAG = "muse_chat_session";
 
 /* ---- Voice task <-> session task ---- */
 
-enum cmd_type_t : uint8_t { CMD_CONNECT, CMD_FORGET, CMD_BEGIN, CMD_END, CMD_CANCEL, CMD_TEXT, CMD_TEXT_CANCEL, CMD_WAKE };
+enum cmd_type_t : uint8_t { CMD_CONNECT, CMD_FORGET, CMD_BEGIN, CMD_END, CMD_CANCEL, CMD_TEXT, CMD_TEXT_CANCEL, CMD_WAKE, CMD_TEXT_SAY };
 
 struct cmd_t {
     cmd_type_t type;
@@ -1990,6 +1990,28 @@ static void handle(const cmd_t &cmd)
         }
         free(cmd.text);
         break;
+    case CMD_TEXT_SAY:
+        /* A voice-proxy transcript injected as a turn whose reply is
+         * captioned and spoken, exactly like a voice turn (the voice task
+         * is already waiting in hatch_reply()). turn_start preempts any
+         * running turn the same way a press does, and its failure path
+         * emits MUSE_HATCH_EV_ERROR for us. */
+        if (!turn_start(cmd.gen, false)) {
+            free(cmd.text);
+            break;
+        }
+        if (muse_tts_voiceproxy_enabled()) {
+            /* turn_begin's prewarm never ran: recording kept the turn local. */
+            muse_tts_voiceproxy_prewarm();
+        }
+        mark(M_RELEASE);
+        emit(MUSE_HATCH_EV_HEARD, cmd.text);
+        send_chat(cmd.text, "text");
+        if (s_turn.phase == P_WAIT_REPLY) {
+            mark(M_SENT);
+        }
+        free(cmd.text);
+        break;
     case CMD_TEXT_CANCEL:
         if (s_turn.text && s_turn.phase != P_IDLE) {
             turn_fail("CANCELLED");
@@ -2201,6 +2223,34 @@ extern "C" void muse_hatch_text_turn(char *text)
         muse_hatch_console("error", "BUSY", nullptr);
         free(text);
     }
+}
+
+/* Injects a transcript (from muse_stt_voiceproxy) as a turn whose reply is
+ * captioned and spoken, unlike muse_hatch_text_turn() whose replies report
+ * to the console. Call from the voice task, which then drains the turn with
+ * muse_hatch_turn_event()/muse_hatch_turn_read() as usual. Returns false
+ * when nothing was queued, so the caller can fail the turn itself: an
+ * event cannot be used for that here (emit() stamps the *previous* turn's
+ * gen until the session runs the command, and the voice task filters on
+ * the gen bumped below, which would drop it). */
+extern "C" bool muse_chat_say_text(const char *text)
+{
+    if (!text || !text[0]) {
+        return false;
+    }
+    char *copy = static_cast<char *>(malloc(strlen(text) + 1));
+    if (!copy) {
+        return false;
+    }
+    strcpy(copy, text);
+    uint32_t gen = ++s_gen;   /* voice-side bump, like muse_hatch_turn_begin */
+    drain_out();              /* after the bump: it stops decode() writing more */
+    cmd_t cmd{ CMD_TEXT_SAY, gen, copy };
+    if (!s_cmds || xQueueSend(s_cmds, &cmd, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        free(copy);
+        return false;
+    }
+    return true;
 }
 
 extern "C" void muse_hatch_text_cancel(void)
