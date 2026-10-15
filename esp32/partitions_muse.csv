@@ -25,3 +25,6 @@ ota_0,     app,  ota_0,   0x20000,  4M,
 ota_1,     app,  ota_1,   0x420000, 4M,
 prod_data, data, 0x40,    0x820000, 0x1000,
 prod_bak,  data, 0x41,    0x821000, 0x1000,
+# esp-sr speech models (WakeNet/NS/VAD) packed by movemodel.py into
+# srmodels.bin; read at runtime via the label "model". 64 KB-aligned.
+model,     data, spiffs,  0x830000, 2M,

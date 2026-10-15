@@ -53,3 +53,8 @@ CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
 # Keep the BSP's SPI transfer allocation and our LVGL buffers small.
 CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=10
 CONFIG_BSP_LCD_DRAW_BUF_DOUBLE=y
+
+# Wake word (muse_wake.c): esp-sr WakeNet. Stopgap model until a Cantonese
+# one exists; models are packed into srmodels.bin and flashed to the "model"
+# partition (partitions_muse.csv). Swap = change this symbol + rebuild.
+CONFIG_SR_WN_WN9L_HISTACKCHAN_TTS3=y

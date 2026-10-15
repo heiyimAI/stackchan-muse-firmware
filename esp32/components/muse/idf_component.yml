@@ -58,6 +58,12 @@ dependencies:
     version: "4.1.0"
     rules:
       - if: "$CONFIG{MUSE_BOARD_ID} == \"m5stack_cores3\""
+  # Wake word (muse_wake.c): official AFE + WakeNet. Board-scoped so the
+  # other profiles neither fetch nor link it.
+  espressif/esp-sr:
+    version: "~2.6.0"
+    rules:
+      - if: "$CONFIG{MUSE_BOARD_ID} == \"m5stack_cores3\""
   waveshare/esp32_c6_touch_amoled_1_8:
     version: "^1.0.0"
     rules:
