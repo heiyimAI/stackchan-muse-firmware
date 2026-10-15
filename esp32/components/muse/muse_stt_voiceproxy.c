@@ -140,8 +140,16 @@ static bool post_attempt(const int16_t *pcm, size_t frames, char *resp, size_t c
     if (head_len < 0 || tail_len < 0) {
         return false;
     }
+    /* Without this the server never parses the body as a form and answers
+     * 422 "Field required" for every field, audio included. Headers go out
+     * with open(), so it can be cleared right after. */
+    esp_http_client_set_header(s_client, "Content-Type",
+                               "multipart/form-data; boundary="
+                               "----MuseSttVpBoundary7MA4YWxkTrZu0gW");
     size_t pcm_bytes = frames * sizeof(int16_t);
-    if (esp_http_client_open(s_client, head_len + (int)pcm_bytes + tail_len) != ESP_OK) {
+    esp_err_t opened = esp_http_client_open(s_client, head_len + (int)pcm_bytes + tail_len);
+    esp_http_client_delete_header(s_client, "Content-Type");
+    if (opened != ESP_OK) {
         return false;
     }
     bool ok = esp_http_client_write(s_client, head, head_len) == head_len;
