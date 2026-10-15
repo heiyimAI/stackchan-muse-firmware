@@ -230,4 +230,22 @@ menu "Muse"
             them. Needs PSRAM. Without it, voice notes go over Home Link's own
             session to its paired VM and replies are shown as text.
 
+    config MUSE_TTS_VOICEPROXY_URL
+        string "voice-proxy TTS endpoint base URL"
+        depends on MUSE_HATCH
+        default ""
+        help
+            Base URL of the self-hosted voice-proxy (e.g. https://voice-proxy.example.com).
+            Empty disables voice-proxy TTS and falls back to silent caption pacing.
+
+    config MUSE_TTS_VOICEPROXY_TOKEN
+        string "Bearer token for voice-proxy"
+        depends on MUSE_HATCH
+        default ""
+
+    config MUSE_TTS_VOICEPROXY_VOICE
+        string "voice_id passed to voice-proxy (MiniMax voice alias)"
+        depends on MUSE_HATCH
+        default "Cantonese_GentleLady"
+
 endmenu

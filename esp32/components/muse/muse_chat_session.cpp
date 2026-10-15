@@ -69,6 +69,7 @@ extern "C" {
 #include "muse_account_api.h"
 #include "muse_link.h"
 #include "muse_settings.h"
+#include "muse_tts_voiceproxy.h"
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
@@ -249,6 +250,7 @@ struct turn_t {
 /* 10 KB, most of it the MP3 decoder: in PSRAM on boards that let static data go
  * there (the AIPI), so Wi-Fi setup and TLS have the internal RAM. */
 EXT_RAM_BSS_ATTR static turn_t s_turn;
+static uint32_t s_tts_id;   /* the voice-proxy TTS request for s_turn.tts_msg */
 
 /* Turn milestones, logged together when the turn ends. */
 enum mark_t : uint8_t { M_RELEASE, M_SENT, M_ACK, M_TEXT, M_DONE, M_TTS, M_MP3, M_AUDIO, M_COUNT };
@@ -954,6 +956,7 @@ static void turn_reset_streams(void)
 static void turn_finish(void)
 {
     turn_reset_streams();
+    muse_tts_voiceproxy_cancel();
     s_turn.phase = P_IDLE;
     s_turn.dict_id = s_turn.chat_id = 0;
     s_turn.tts_msg = -1;
@@ -1017,6 +1020,10 @@ static void turn_begin(uint32_t gen)
 {
     if (!turn_start(gen, false)) {
         return;
+    }
+    /* Speech comes after the reply; open the connection while they talk. */
+    if (muse_tts_voiceproxy_enabled()) {
+        muse_tts_voiceproxy_prewarm();
     }
     if (VOICE_NOTE) {
         if (!open_note()) {
@@ -1527,6 +1534,27 @@ static void start_tts(void)
          * and finishes the message once it's drained.
          */
         m.pcm_start = s_turn.pcm_out;
+        /* Voice-proxy TTS path: hand the message text to the voice-proxy
+         * task, which streams MP3 into s_turn.mp3. tts_pump() below moves
+         * bytes from the task's stream buffer into s_turn.mp3; decode()
+         * plays them at the speaker's volume. */
+        if (muse_tts_voiceproxy_enabled() &&
+            muse_tts_voiceproxy_request(++s_tts_id, s_turn.texts + i * TEXT_MAX)) {
+            m.tts = TTS_ACTIVE;
+            s_turn.tts_msg = i;
+            s_turn.silent = false;
+            m.pcm_start = s_turn.pcm_out;
+            m.pcm_frames = 0;
+            s_turn.mp3_len = 0;
+            s_turn.mp3_ended = false;
+            s_turn.kbps = 0;
+            s_turn.down_rate = 0;
+            mp3dec_init(&s_turn.dec);
+            mark(M_TTS);
+            ESP_LOGI(TAG, "speaking message %s (%u chars)", m.id, (unsigned)m.len);
+            show_reply_start(m);
+            return;
+        }
         m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
         m.tts = TTS_ACTIVE;
         s_turn.tts_msg = i;
@@ -1560,6 +1588,40 @@ static void tts_end(stream_t *s, bool ok)
     } else {
         s_turn.msgs[i].tts = TTS_FINISHED;
         s_turn.tts_msg = -1;
+    }
+}
+
+/* Moves voice-proxy's MP3 into the decoder's buffer; falls back to text
+ * pacing if the request fails. Called from hatch_task() between
+ * start_tts() and decode(). */
+static void tts_pump(void)
+{
+    if (s_turn.tts_msg < 0 || s_turn.silent || s_turn.mp3_ended) {
+        return;
+    }
+    int st = muse_tts_voiceproxy_status(s_tts_id);
+    bool drained = true;
+    while (s_turn.mp3_len < MP3_BUF) {
+        size_t n = muse_tts_voiceproxy_read(s_tts_id, s_turn.mp3 + s_turn.mp3_len,
+                                            MP3_BUF - s_turn.mp3_len);
+        if (!n) {
+            break;
+        }
+        mark(M_MP3);
+        s_turn.mp3_len += n;
+        drained = s_turn.mp3_len < MP3_BUF;
+    }
+    if (st == MUSE_TTS_VOICEPROXY_DONE && drained) {
+        s_turn.mp3_ended = true;   /* decode() drains the rest, then finishes */
+    } else if (st == MUSE_TTS_VOICEPROXY_FAILED) {
+        msg_t &m = s_turn.msgs[s_turn.tts_msg];
+        if (s_turn.pcm_out == m.pcm_start && !s_turn.mp3_len) {
+            ESP_LOGW(TAG, "speech failed, showing the reply instead");
+            m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
+            s_turn.silent = true;
+        } else {
+            s_turn.mp3_ended = true;   /* play what arrived */
+        }
     }
 }
 
@@ -1990,6 +2052,7 @@ static void hatch_task(void *arg)
         }
         if (s_turn.phase == P_WAIT_REPLY) {
             start_tts();
+            tts_pump();
             decode();
         }
         if (!s_connected) {
@@ -2062,6 +2125,7 @@ extern "C" void muse_hatch_start(void)
         s.cap = NDJSON_LINE_MAX;
     }
     s_turn.tts_msg = -1;
+    muse_tts_voiceproxy_start();
     /* Stack in PSRAM: TLS, Noise and the MP3 decoder (~16 KB of scratch) all run here. */
     if (!s_cmds || !s_events || !s_in || !s_out || !s_turn.chunk || !s_turn.mp3 || (VOICE_NOTE && !s_turn.note) || !s_pcm || !s_pcm16 ||
         xTaskCreatePinnedToCoreWithCaps(hatch_task, "muse_chat", 48 * 1024, nullptr, 5, nullptr, 0,
