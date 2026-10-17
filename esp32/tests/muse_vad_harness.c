@@ -170,6 +170,57 @@ static void test_threshold_rule(void)
     expect(v.armed == false, "threshold: one chunk of each never arms");
 }
 
+/*
+ * The wake guard: the model reports after it has heard its phrase, and only
+ * a quarter second well above the room makes that believable. 32 ms a chunk
+ * on a 512-sample look, so 256 ms is eight of them.
+ */
+static muse_energy_t energy_make(void)
+{
+    muse_energy_t e;
+    muse_energy_reset(&e, 32);
+    return e;
+}
+
+static void test_energy_quiet(void)
+{
+    muse_energy_t e = energy_make();
+    for (int i = 0; i < 32; i++) {
+        muse_energy_feed(&e, -60.0f);
+    }
+    expect(!muse_energy_accept(&e, -60.0f), "energy: the room alone is not a voice");
+}
+
+static void test_energy_burst(void)
+{
+    muse_energy_t e = energy_make();
+    for (int i = 0; i < 8; i++) {
+        muse_energy_feed(&e, -48.0f);   /* exactly the floor + 12 dB */
+    }
+    for (int i = 0; i < 24; i++) {
+        muse_energy_feed(&e, -60.0f);
+    }
+    expect(muse_energy_accept(&e, -60.0f), "energy: 256 ms at the floor + 12 counts");
+}
+
+static void test_energy_below(void)
+{
+    muse_energy_t e = energy_make();
+    for (int i = 0; i < 32; i++) {
+        muse_energy_feed(&e, -49.0f);   /* one dB short */
+    }
+    expect(!muse_energy_accept(&e, -60.0f), "energy: one dB short is not enough");
+}
+
+static void test_energy_short(void)
+{
+    muse_energy_t e = energy_make();
+    for (int i = 0; i < 4; i++) {
+        muse_energy_feed(&e, -40.0f);
+    }
+    expect(!muse_energy_accept(&e, -60.0f), "energy: 128 ms is too short to judge");
+}
+
 int main(void)
 {
     test_normal();
@@ -181,6 +232,10 @@ int main(void)
     test_loud();
     test_dipped_speech_arms();
     test_threshold_rule();
+    test_energy_quiet();
+    test_energy_burst();
+    test_energy_below();
+    test_energy_short();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

@@ -40,6 +40,9 @@
 #include "muse_stt_voiceproxy.h"
 #endif
 #include "muse_vad.h"
+#ifdef CONFIG_MUSE_WAKE
+#include "muse_wake.h"
+#endif
 #include "muse_wifi.h"
 
 static const char *TAG = "muse_voice";
@@ -177,7 +180,59 @@ static void pre_keep(size_t chunks)
     }
 }
 
-/* One 20 ms idle read: feeds the pre-roll ring and the settings mic meter. */
+/*
+ * The room's level: the median of the last 320 ms of idle chunks, followed
+ * quickly down and slowly up so that a voice is never learned as the
+ * background. The wake word's guard and the end-of-speech detector both
+ * measure against it — a fixed floor would have to be re-tuned for every
+ * room (and the first one tried sat exactly on this room's noise).
+ * The scheme is esp32-thinks'.
+ */
+#define NOISE_MEDIAN 16        /* 320 ms of 20 ms chunks */
+#define NOISE_FOLLOW_DB 6.0f   /* within this of the estimate, it is the room */
+/*
+ * A voice has to beat the room by this much before it is speech. The
+ * estimate is the room's *median*, so without it half the room's own noise
+ * sits above the threshold: the note then never finds 1.4 s of quiet and
+ * runs to the cap. (esp32-thinks' speech guard uses the same 6 dB.)
+ */
+#define NOISE_VOICE_DB 6.0f
+static float s_noise_ring[NOISE_MEDIAN];
+static unsigned s_noise_at, s_noise_fill;
+static float s_noise_db = (float)VAD_FLOOR_DB;   /* until the ring has filled */
+static bool s_noise_measured;
+
+static void noise_track(float db)
+{
+    s_noise_ring[s_noise_at] = db;
+    s_noise_at = (s_noise_at + 1) % NOISE_MEDIAN;
+    if (s_noise_fill < NOISE_MEDIAN) {
+        s_noise_fill++;
+        return;
+    }
+    float sorted[NOISE_MEDIAN];
+    memcpy(sorted, s_noise_ring, sizeof sorted);
+    for (unsigned i = 1; i < NOISE_MEDIAN; i++) {   /* 16 entries: insertion sort is plenty */
+        float x = sorted[i];
+        unsigned j = i;
+        while (j > 0 && sorted[j - 1] > x) {
+            sorted[j] = sorted[j - 1];
+            j--;
+        }
+        sorted[j] = x;
+    }
+    float background = sorted[NOISE_MEDIAN / 2];
+    if (!s_noise_measured) {
+        s_noise_db = background;
+        s_noise_measured = true;
+    } else if (background < s_noise_db + NOISE_FOLLOW_DB) {
+        s_noise_db += 0.1f * (background - s_noise_db);
+    } else {
+        s_noise_db += 0.002f;   /* louder than the room: speech, not the room */
+    }
+}
+
+/* One 20 ms idle read: feeds the pre-roll ring and the mic meter. */
 static void idle_capture(void)
 {
     if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
@@ -192,6 +247,7 @@ static void idle_capture(void)
         s_settle--;
         return;
     }
+    noise_track(muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK));
     pre_chunk_t *c = &s_pre[s_pre_next];
 #if MUSE_LOW_MEM
     c->start = s_pre_enc;
@@ -391,6 +447,13 @@ static bool record(bool barge_in, bool voice, size_t *held, char *why, size_t ca
          */
         if (!released) {
             bool up = got_event(MUSE_PTT_UP);
+            if (voice) {
+                /* The room as the idle loop last measured it, plus enough to
+                 * rise above the room's own noise: the note is judged
+                 * against where this room actually sits, not against a
+                 * number chosen on a bench. */
+                vad.floor_db = s_noise_db + NOISE_VOICE_DB;
+            }
             bool speech_over = voice && muse_vad_step(&vad, st.last_db);
             if (up || speech_over) {
                 released = true;
@@ -933,6 +996,18 @@ static void voice_task(void *arg)
             bool asleep = muse_state_asleep();
             bool battery = muse_state_on_battery();
             bool rest = asleep && battery && !s_chirp && !s_mp3test && !s_loopback;
+#ifdef CONFIG_MUSE_WAKE
+            /* Asleep on battery, resting used to power the codecs down — and
+             * with them the microphone, so the wake word could not be heard
+             * at all. With the engine up, the codecs stay on and this loop
+             * keeps reading: that is the price of always listening. Wi-Fi
+             * still rests; the engine runs from the model partition, not the
+             * network. Saying so costs the connection its slow-poll hint,
+             * which is a fair description: it is listening, not resting. */
+            bool listening = rest && muse_wake_listening();
+#else
+            bool listening = false;
+#endif
 #if HOLD_NOTES
             /* A press goes first: send_held() leaves it queued and returns
              * without backing off, so retrying before it's read would spin. */
@@ -948,11 +1023,11 @@ static void voice_task(void *arg)
                 continue;
             }
 #endif
-            set_resting(rest);
+            set_resting(rest && !listening);
             /* On battery Wi-Fi rests with the codecs, and between turns dozes
              * between beacons as xiaozhi's idle does; a press wakes it fully. */
             muse_wifi_power(rest ? MUSE_WIFI_REST : battery ? MUSE_WIFI_DOZE : MUSE_WIFI_FULL);
-            if (rest) {
+            if (rest && !listening) {
                 /* Wait for waking, USB power or a bench request without
                  * polling (the timeout is only a backstop, or a look for
                  * Wi-Fi to send saved notes), so the CPU can stay asleep. */
@@ -981,6 +1056,16 @@ static void voice_task(void *arg)
             }
             /* The 20 ms read paces this loop. */
             idle_capture();
+#ifdef CONFIG_MUSE_WAKE
+            /* The wake word listens to the same chunk the pre-roll just got —
+             * but not through the settle window after Muse has played
+             * something: that tail is Muse's own voice, and it would be
+             * listening to itself. The detector runs here, in this loop, so
+             * it has to keep up with real time. */
+            if (s_settle <= 0) {
+                muse_wake_feed(s_chunk, MUSE_AUDIO_CHUNK, s_noise_db);
+            }
+#endif
             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
                 continue;
             }
@@ -1004,6 +1089,13 @@ static void voice_task(void *arg)
              * the ring are, in case the trigger point clipped the first one. */
             pre_keep(VAD_PREROLL_CHUNKS);
         }
+#ifdef CONFIG_MUSE_WAKE
+        /* Everything the engine has buffered belongs to the far side of this
+         * turn — the phrase that opened it, or the room while it ran — and
+         * must not be listened to again. Nothing is fed to it until the loop
+         * comes back round to its idle read. */
+        muse_wake_flush();
+#endif
         size_t held;
         char why[96];
         bool ok = record(pending_down, voice, &held, why, sizeof(why));

@@ -35,7 +35,7 @@ class MuseVadTest(unittest.TestCase):
              "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
              "-I", str(ROOT / "components/muse"),
              str(ROOT / "tests/muse_vad_harness.c"),
-             str(ROOT / "components/muse/muse_vad.c"),
+             str(ROOT / "components/muse/muse_vad.c"), "-lm",
              "-o", str(cls.binary)],
             capture_output=True, text=True,
         )

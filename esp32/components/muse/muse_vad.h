@@ -62,3 +62,19 @@ float muse_vad_threshold(const muse_vad_t *v);
 /* Feeds one chunk's dBFS. True once speech has ended — sticky, so it keeps
  * returning true until reset; the caller stops recording on the first one. */
 bool muse_vad_step(muse_vad_t *v, float db);
+
+/*
+ * The wake word's second opinion. WakeNet reports after it has heard its
+ * phrase, and a burst of noise can score just over its threshold; this keeps
+ * the last second of chunk levels and accepts only if some 256 ms of it was
+ * 12 dB above the room. Same idea as esp32-thinks' wake guard, same numbers.
+ */
+typedef struct {
+    float power[32];     /* the last ~1 s, as power so windows can be averaged */
+    unsigned at, count;
+    unsigned step_ms;    /* what one entry covers, for the window in samples */
+} muse_energy_t;
+
+void muse_energy_reset(muse_energy_t *e, unsigned step_ms);
+void muse_energy_feed(muse_energy_t *e, float db);
+bool muse_energy_accept(const muse_energy_t *e, float floor_db);

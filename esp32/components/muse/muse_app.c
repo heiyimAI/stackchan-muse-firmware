@@ -30,6 +30,9 @@
 #include "muse_state.h"
 #include "muse_ui.h"
 #include "muse_voice.h"
+#ifdef CONFIG_MUSE_WAKE
+#include "muse_wake.h"
+#endif
 #include "muse_wifi.h"
 
 static const char *TAG = "muse";
@@ -85,6 +88,11 @@ void muse_app_run(const muse_board_t *board)
     } else if (muse_voice_start(q) != ESP_OK) {
         ESP_LOGE(TAG, "voice pipeline unavailable");
     } else {
+#ifdef CONFIG_MUSE_WAKE
+        /* A bonus on top of the button, never a prerequisite: it reports its
+         * own failure and the button keeps working. */
+        muse_wake_start(q);
+#endif
         muse_state_set_mode(MUSE_MODE_IDLE);
         muse_state_set_caption("%s", "");   /* the button icons say how to talk */
     }

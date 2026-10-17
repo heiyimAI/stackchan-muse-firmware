@@ -128,6 +128,20 @@ set(muse_priv_requires
     esp_driver_pcnt)
 list(APPEND muse_priv_requires camera)
 
+if(CONFIG_MUSE_WAKE)
+    list(APPEND srcs "muse_wake.c")
+    # esp-sr reaches us the same way the board profiles fetch it: by this
+    # component's manifest, scoped to MUSE_BOARD_ID (see idf_component.yml).
+    # A profile that turns the option on without that rule fails here rather
+    # than a screen of missing symbols at link time.
+    if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../managed_components/espressif__esp-sr")
+        message(FATAL_ERROR
+            "CONFIG_MUSE_WAKE needs the esp-sr component, which only the "
+            "profiles named in components/muse/idf_component.yml fetch.")
+    endif()
+    list(APPEND muse_priv_requires esp-sr)
+endif()
+
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "."

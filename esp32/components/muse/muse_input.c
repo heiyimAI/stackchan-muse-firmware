@@ -43,6 +43,9 @@
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_ui.h"
+#if CONFIG_MUSE_WAKE
+#include "muse_wake.h"
+#endif
 #include "muse_voice.h"
 #include "muse_wifi.h"
 #if CONFIG_MUSE_WATCHER_CAMERA
@@ -759,6 +762,24 @@ static bool console_command(char *line, bool whole)
         set_face(line + 5);
         return true;
     }
+#if CONFIG_MUSE_WAKE
+    if (!strcmp(line, "wn")) {
+        /* What the model listens for, and how sure it has to be, right now. */
+        printf("@wn {\"word\":\"%s\",\"threshold\":%.4f}\n", muse_wake_word(),
+               (double)muse_wake_threshold());
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "wn.th=", 6)) {
+        /* A near-miss phrase only crosses a lower bar: sweep it live. */
+        float t = strtof(line + 6, NULL);
+        bool ok = muse_wake_set_threshold(t);
+        printf("@wn.th {\"want\":%.4f,\"now\":%.4f,\"ok\":%s}\n", (double)t,
+               (double)muse_wake_threshold(), ok ? "true" : "false");
+        fflush(stdout);
+        return true;
+    }
+#endif
     if (strncmp(line, "chat", 4) != 0) {
         return false;
     }

@@ -277,24 +277,27 @@ menu "Muse"
             usual end-of-speech hangover of 10-20 dB.
 
     config MUSE_VAD_FLOOR_DB
-        int "Speech end: absolute floor (negative dBFS)"
+        int "Speech end: floor before the room has been measured (negative dBFS)"
         depends on MUSE_HATCH
         range -80 -30
         default -45
         help
-            The threshold above never drops below this, so the room's noise
-            floor cannot count as speech — which, in most rooms, is what this
-            setting really is: the level a voice has to beat. Too low and the
-            room talks over the speaker; too high and a soft voice is never
-            heard at all.
+            The floor is measured, not set: the voice task follows the room's
+            level from the idle microphone reads (the median of the last
+            320 ms, quickly down and slowly up), and both the wake word's
+            guard and this detector judge against it. A fixed number had to
+            be re-tuned for every room — the first one tried sat exactly on
+            this room's noise and the room counted as speech.
 
-            Measured on a CoreS3 at the default 30 dB mic gain: a voice reads
-            about -40 dBFS over a whole note (rms), and the room between its
-            words -52 to -68 dBFS. This default sits in that gap. Every
-            voice-triggered note logs the two numbers to compare —
-                muse_voice: voice: peak X dBFS, threshold Y dBFS, armed
-            where Y is this floor until the peak outgrows it (-27 dBFS and
-            louder), and only chunks that reach Y count as speech at all.
+            This value is only the starting point, used for the first third
+            of a second before the room has been heard. Measured on a CoreS3
+            at the default 30 dB mic gain: a voice reads about -40 dBFS over
+            a whole note (rms), and the room between its words -52 to -68.
+            Every note logs the numbers to compare — "voice: peak X dBFS,
+            threshold Y dBFS" — where Y is the measured room plus 6 dB (the
+            estimate is the room's median, so a voice has to beat it, not
+            sit on it), or the speech peak minus the drop above it when that
+            is higher.
 
     config MUSE_VAD_MIN_SPEECH_CHUNKS
         int "Speech chunks before the end can fire (20 ms each)"
@@ -312,11 +315,16 @@ menu "Muse"
         int "Silent chunks that end the note (20 ms each)"
         depends on MUSE_HATCH
         range 1 150
-        default 15
+        default 70
         help
-            300 ms of silence ends the note. This is added latency at the end
-            of every turn; shortening it makes the robot feel quicker to
-            answer and risks clipping the last word.
+            1.4 s of silence ends a note that no finger is holding open. It
+            is a long time on purpose: people pause mid-sentence, and a note
+            that stops at the first 300 ms gap loses the rest of the
+            question. The price is that everything after the talking waits
+            this long (esp32-thinks arrived at the same 1.4 s on the same
+            kind of pipeline). Push-to-talk is unaffected: the button decides.
+
+            Lower it for a snappier robot that occasionally cuts you off.
 
     config MUSE_VAD_NO_SPEECH_MS
         int "Voice-triggered turn abandoned after (ms of no speech)"
@@ -340,5 +348,62 @@ menu "Muse"
             begins, so the first syllable after the wake word is not clipped
             while the trigger travels to the voice task. The wake phrase
             itself is discarded with the rest of the ring.
+
+    config MUSE_WAKE
+        bool "Wake word: open the microphone by saying it"
+        depends on MUSE_ENABLED && MUSE_HATCH && MUSE_BOARD_M5STACK_CORES3
+        default y
+        help
+            The microphone opens on the wake word alone, as the button does,
+            and the note that follows ends when the talking does (the
+            settings above). The phrase is the model's, not ours to choose:
+            the model in the partition is picked by esp-sr's own menuconfig
+            (SR_WN_WN9_* in the board's sdkconfig overlay), and its phrase
+            and language are its own. There is no Cantonese wake model in
+            esp-sr, so the phrase on this build is English — "Hi, Stack
+            Chan" — which is exactly the mismatch the wake word's own field
+            testing is there to measure.
+
+            The engine is the WakeNet model on its own, not esp-sr's AFE:
+            the AFE is a whole audio front end (echo cancelling, noise
+            suppression, a task and ring buffers of its own) and it does not
+            fit on this board alongside Muse's Wi-Fi, TLS and display. Only
+            its wake word is wanted. The detector runs in the voice task's
+            idle loop, on the chunk the pre-roll just read, and costs a model
+            handle and a 1 KB buffer in PSRAM.
+
+            Costs, so they are not a surprise:
+            - The engine listens whenever the device is idle, on battery as
+              well as on USB. Asleep it keeps the microphone codecs powered,
+              which is most of what resting used to save.
+            - The model's own state in internal RAM. If it will not fit, the
+              firmware says so once and falls back to the button.
+            - No echo cancelling: Muse cannot hear the wake word over its own
+              voice while it is speaking, and the engine is not fed while a
+              turn is running. Interrupting a reply still needs the button.
+
+            Off: the button is the only way to start a turn.
+
+    config MUSE_WAKE_THRESHOLD_PCT
+        int "Wake word threshold override (percent, 0 = the model's own)"
+        depends on MUSE_WAKE
+        range 0 99
+        default 0
+        help
+            How sure the model has to be before it counts as a wake word.
+            Each model ships with a threshold tuned by Espressif, and the
+            boot log prints it —
+                muse_wake: wake word 1: "Hey Ivy", threshold 0.619
+            — so 0 here means use that.
+
+            Lower catches more of the phrase and more of everything else: a
+            television, a sentence that happens to contain it. The useful
+            case for a number here is a phrase the model was *not* trained
+            on: say a near miss ("Hi AI HEI" against a model that listens
+            for "Hey Ivy") and it may only cross a lower bar. Raise it if
+            Muse wakes when nobody called it.
+
+            The same value can be changed on a running device, for a
+            comparison without a rebuild: ">wn.th=0.55" on the console.
 
 endmenu
