@@ -406,4 +406,46 @@ menu "Muse"
             The same value can be changed on a running device, for a
             comparison without a rebuild: ">wn.th=0.55" on the console.
 
+    config MUSE_BODY
+        bool "StackChan body: head touch, servos, RGB LEDs"
+        depends on MUSE_ENABLED && MUSE_BOARD_M5STACK_CORES3
+        default y
+        help
+            The M5 StackChan body under the CoreS3: a 3-zone capacitive head
+            panel (Si12T), two SCS serial-bus servos (yaw and pitch) and 12
+            RGB LEDs driven through the body's IO expander.
+
+            - Touch the head and it starts a turn, like the wake word; touch
+              it while recording and the note is dropped; touch it while a
+              reply plays and the reply stops. The last one is the barge-in a
+              microphone cannot do without echo cancelling.
+            - The servos turn to face whoever called it (before the
+              microphone opens, so the motors are silent while it listens),
+              tilt while it thinks and sway while it speaks.
+            - The LEDs follow the state: green listening, amber thinking,
+              cyan speaking, a white flash on a touch, red on an error, dark
+              while asleep.
+
+            Costs: the servos hold their position (a few mA, from the body's
+            own 550 mAh battery), and the LED ring is off while asleep.
+            Everything here is optional at runtime — a CoreS3 without the body
+            logs once and behaves exactly as before.
+
+            Console: ">body" prints what answered, where the head is and what
+            the panel sees; ">body.pose yaw=80 pitch=50" moves it (tenths of a
+            degree); ">body.led r=0 g=0 b=255" lights the ring;
+            ">body.zero yaw=460 pitch=620" saves a new centre.
+
+    config MUSE_BODY_TOUCH_SENS
+        int "Head touch sensitivity (1 = lightest touch, 7 = firmest)"
+        depends on MUSE_BODY
+        range 1 7
+        default 1
+        help
+            Si12T's 8 levels: a higher value makes the head demand a firmer
+            touch. 1 is the lightest and is the M5 StackChan default for the
+            head's three small zones; raise it (3-7) if the head reacts to
+            clothing or breath. The same value is also tunable on a running
+            device — ">body.sens=2" — without a rebuild.
+
 endmenu

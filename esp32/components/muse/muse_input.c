@@ -46,6 +46,9 @@
 #if CONFIG_MUSE_WAKE
 #include "muse_wake.h"
 #endif
+#if CONFIG_MUSE_BODY
+#include "muse_body.h"
+#endif
 #include "muse_voice.h"
 #include "muse_wifi.h"
 #if CONFIG_MUSE_WATCHER_CAMERA
@@ -147,8 +150,37 @@ void muse_input_voice_trigger(const char *why)
     if (!s_queue) {
         return;   /* before muse_input_start: there is nothing to record with */
     }
+    /* The head turns to face whoever called it, and the motors are still by
+     * the time recording starts: a body with no servos returns at once. */
+#if CONFIG_MUSE_BODY
+    muse_body_pre_listen();
+#endif
     ESP_LOGI(TAG, "PTT down (voice)");
     xQueueSend(s_queue, &ev, 0);
+}
+
+void muse_input_touch_press(void)
+{
+    muse_state_poke();
+    switch (muse_state_mode(NULL)) {
+    case MUSE_MODE_IDLE:
+        /* A voice-style turn: it ends on silence, not on a finger. */
+        muse_input_voice_trigger("touch");
+        break;
+    case MUSE_MODE_LISTENING:
+    case MUSE_MODE_THINKING:
+    case MUSE_MODE_SPEAKING:
+        /* Touch always means stop: drop the note, or hush the reply. */
+        muse_voice_request_hush();
+        break;
+    default:
+        break;
+    }
+}
+
+void muse_input_touch_release(void)
+{
+    /* Nothing to do in this phase: the edges that matter fire on the press. */
 }
 
 static void toggle_phone_setup(void)
@@ -709,6 +741,13 @@ static void set_face(const char *name)
  * Console-only commands; false for setup commands. Their buffers are taken
  * per command: without PSRAM, static ones would hold internal RAM for good.
  */
+/* Reads "<key><int>" from a console line, wherever it appears. */
+static int kv_int(const char *line, const char *key, int def)
+{
+    const char *p = strstr(line, key);
+    return p ? (int)strtol(p + strlen(key), NULL, 10) : def;
+}
+
 static bool console_command(char *line, bool whole)
 {
     if (!strcmp(line, "status")) {
@@ -776,6 +815,54 @@ static bool console_command(char *line, bool whole)
         bool ok = muse_wake_set_threshold(t);
         printf("@wn.th {\"want\":%.4f,\"now\":%.4f,\"ok\":%s}\n", (double)t,
                (double)muse_wake_threshold(), ok ? "true" : "false");
+        fflush(stdout);
+        return true;
+    }
+#endif
+#if CONFIG_MUSE_BODY
+    if (!strcmp(line, "i2c")) {
+        char found[128];
+        muse_body_scan(found, sizeof found);
+        printf("@i2c {\"found\":\"%s\"}\n", found);
+        fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "body.tap")) {
+        /* The head panel's press, without a hand: exercises wake and hush. */
+        muse_input_touch_press();
+        return true;
+    }
+    if (!strncmp(line, "body.sens", 9)) {
+        int level = kv_int(line, "level=", kv_int(line, "=", 3));
+        bool ok = muse_body_set_sens(level);
+        printf("@body.sens {\"level\":%d,\"ok\":%s}\n", level, ok ? "true" : "false");
+        fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "body")) {
+        char json[224];
+        muse_body_status(json, sizeof json);
+        printf("@body %s\n", json);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "body.pose", 9) || !strncmp(line, "body.led", 8) ||
+        !strncmp(line, "body.zero", 9)) {
+        int yaw = kv_int(line, "yaw=", 0);
+        int pitch = kv_int(line, "pitch=", 0);
+        if (!strncmp(line, "body.pose", 9)) {
+            bool ok = muse_body_move(yaw, pitch);
+            printf("@body.pose {\"yaw\":%d,\"pitch\":%d,\"ok\":%s}\n", yaw, pitch,
+                   ok ? "true" : "false");
+        } else if (!strncmp(line, "body.led", 8)) {
+            int r = kv_int(line, "r=", 0), g = kv_int(line, "g=", 0), b = kv_int(line, "b=", 0);
+            muse_body_leds((uint8_t)r, (uint8_t)g, (uint8_t)b);
+            printf("@body.led {\"r\":%d,\"g\":%d,\"b\":%d}\n", r, g, b);
+        } else {
+            bool ok = muse_body_zero(yaw, pitch);
+            printf("@body.zero {\"yaw\":%d,\"pitch\":%d,\"ok\":%s}\n", yaw, pitch,
+                   ok ? "true" : "false");
+        }
         fflush(stdout);
         return true;
     }

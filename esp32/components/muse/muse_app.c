@@ -30,6 +30,9 @@
 #include "muse_state.h"
 #include "muse_ui.h"
 #include "muse_voice.h"
+#ifdef CONFIG_MUSE_BODY
+#include "muse_body.h"
+#endif
 #ifdef CONFIG_MUSE_WAKE
 #include "muse_wake.h"
 #endif
@@ -92,6 +95,11 @@ void muse_app_run(const muse_board_t *board)
         /* A bonus on top of the button, never a prerequisite: it reports its
          * own failure and the button keeps working. */
         muse_wake_start(q);
+#endif
+#ifdef CONFIG_MUSE_BODY
+        /* The StackChan body is a bonus too: with nothing attached it
+         * says so once and every body call becomes a no-op. */
+        muse_body_start();
 #endif
         muse_state_set_mode(MUSE_MODE_IDLE);
         muse_state_set_caption("%s", "");   /* the button icons say how to talk */

@@ -44,6 +44,14 @@ void muse_voice_request_loopback(void);
 /* Bench test: decodes and plays a built-in MP3 reply. */
 void muse_voice_request_mp3test(void);
 
+/*
+ * Stop whatever the voice task is doing: hush a reply mid-sentence, or drop
+ * the note being recorded. The flag is read by the voice task itself (never a
+ * cross-task cancel — that would leave the reply loop waiting for a DONE that
+ * can no longer arrive) and is consumed once. Safe from any task.
+ */
+void muse_voice_request_hush(void);
+
 /* Asleep with nothing to play: codecs off, Wi-Fi dozing. */
 bool muse_voice_resting(void);
 

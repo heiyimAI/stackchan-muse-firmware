@@ -69,6 +69,16 @@ esp_err_t muse_input_start(QueueHandle_t queue);
  */
 void muse_input_voice_trigger(const char *why);
 
+/*
+ * The head panel's edges, from the body driver (muse_body.c) or a bench key.
+ * A press starts a voice-triggered turn when the device is idle — the same
+ * route the wake word takes — and otherwise stops what is going on: a reply
+ * mid-sentence, or the note being recorded. The release is bookkeeping for
+ * now. Safe from any task.
+ */
+void muse_input_touch_press(void);
+void muse_input_touch_release(void);
+
 /* LVGL microphone press/release edges; handled by the existing input task. */
 void muse_input_touch_talk(bool pressed);
 

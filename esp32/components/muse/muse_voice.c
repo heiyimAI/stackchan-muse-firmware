@@ -40,12 +40,20 @@
 #include "muse_stt_voiceproxy.h"
 #endif
 #include "muse_vad.h"
+#ifdef CONFIG_MUSE_BODY
+#include "muse_body.h"
+#else
+#define muse_body_set_pose(p) ((void)0)
+#endif
 #ifdef CONFIG_MUSE_WAKE
 #include "muse_wake.h"
 #endif
 #include "muse_wifi.h"
 
 static const char *TAG = "muse_voice";
+
+/* Set by muse_voice_request_hush(): the voice task consumes it. */
+static volatile bool s_hush;
 
 #define MAX_SECS 15
 #define TAIL_FRAMES (MUSE_AUDIO_RATE * 12 / 100)   /* capture lag + poll interval, stops before the release click */
@@ -359,6 +367,8 @@ static void drop_rec(void);
 static bool record(bool barge_in, bool voice, size_t *held, char *why, size_t cap)
 {
     muse_state_set_mode(MUSE_MODE_LISTENING);
+    muse_body_set_pose(MUSE_BODY_POSE_LISTEN);
+    s_hush = false;
     muse_state_set_progress(0);
     s_rec_n = s_sent = 0;
     s_live = s_tried = false;
@@ -426,6 +436,16 @@ static bool record(bool barge_in, bool voice, size_t *held, char *why, size_t ca
             }
         }
         n += MUSE_AUDIO_CHUNK;
+        if (s_hush) {
+            /* The head was touched: the note is not wanted. */
+            s_hush = false;
+            ESP_LOGI(TAG, "note dropped by touch");
+            muse_hatch_turn_cancel();
+            drop_rec();
+            *held = n - pre;
+            why[0] = '\0';
+            return false;
+        }
         bool tick = n % (MUSE_AUDIO_CHUNK * 5) == 0;
 #ifdef CONFIG_MUSE_STT_VOICEPROXY
         /* STT mode keeps the note local; there is nothing to stream to Muse. */
@@ -516,6 +536,8 @@ static void go_idle(const char *caption);
 static bool hatch_reply(bool *delivered)
 {
     muse_state_set_mode(MUSE_MODE_THINKING);
+    muse_body_set_pose(MUSE_BODY_POSE_THINK);
+    s_hush = false;
     muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
     static int16_t buf[MUSE_AUDIO_CHUNK];
     static const int16_t silence[MUSE_AUDIO_CHUNK];
@@ -526,6 +548,15 @@ static bool hatch_reply(bool *delivered)
     int64_t t0 = esp_timer_get_time();
     *delivered = false;
     for (;;) {
+        if (s_hush) {
+            /* Touch to hush: a finished reply, not an interruption —
+             * the caller goes idle instead of recording a new note. */
+            s_hush = false;
+            ESP_LOGI(TAG, "reply hushed by touch");
+            muse_hatch_turn_cancel();
+            muse_state_set_level(0);
+            return false;
+        }
         muse_hatch_ev_t ev;
         while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
             switch (ev) {
@@ -571,6 +602,7 @@ static bool hatch_reply(bool *delivered)
             if (!speaking) {
                 speaking = true;
                 muse_state_set_mode(MUSE_MODE_SPEAKING);
+                muse_body_set_pose(MUSE_BODY_POSE_SPEAK);
                 ESP_LOGI(TAG, "reply audio after %.2fs", (esp_timer_get_time() - t0) / 1e6);
             }
             muse_state_set_level(muse_audio_level(buf, n));
@@ -602,6 +634,7 @@ static void go_idle(const char *caption)
 {
     muse_state_set_progress(0);
     muse_state_set_mode(MUSE_MODE_IDLE);
+    muse_body_set_pose(MUSE_BODY_POSE_IDLE);
     muse_state_set_caption("%s", caption);
 }
 
@@ -903,6 +936,15 @@ static bool finish_note(void)
         char text[512];
         bool ok = muse_stt_voiceproxy_transcribe(s_rec, s_rec_n, text, sizeof(text), 26000);
         drop_rec();
+        if (s_hush) {
+            /* The head was touched while the note was being transcribed:
+             * that is a stop, not a question. The transcript is dropped
+             * rather than sent to Muse. */
+            s_hush = false;
+            ESP_LOGI(TAG, "turn dropped by touch");
+            go_idle("");
+            return false;
+        }
         if (!ok) {
             go_idle("DIDN'T CATCH THAT");
             return false;
@@ -1169,6 +1211,12 @@ void muse_voice_request_loopback(void)
 void muse_voice_request_mp3test(void)
 {
     s_mp3test = true;
+    muse_state_nudge();
+}
+
+void muse_voice_request_hush(void)
+{
+    s_hush = true;
     muse_state_nudge();
 }
 

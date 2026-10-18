@@ -128,6 +128,10 @@ set(muse_priv_requires
     esp_driver_pcnt)
 list(APPEND muse_priv_requires camera)
 
+if(CONFIG_MUSE_BODY)
+    list(APPEND srcs "muse_body.c" "muse_touch.c")
+endif()
+
 if(CONFIG_MUSE_WAKE)
     list(APPEND srcs "muse_wake.c")
     # esp-sr reaches us the same way the board profiles fetch it: by this
