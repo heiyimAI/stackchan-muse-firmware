@@ -543,11 +543,13 @@ int muse_body_scan(char *out, size_t cap)
     if (!bus) {
         return snprintf(out, cap, "no bus");
     }
-    /* The PMU is at 400 kHz. The body parts are 100 kHz. The bus driver
-     * serialises transactions, so a slow probe on the bus is fine: it
-     * affects subsequent transfers only by being slower, not by getting
-     * a bus error. (We add and remove a device per address so that a probe
-     * failure does not leak a handle into the bus table.) */
+    /* A scan briefly attaches and detaches a device per address. The bus
+     * driver does not like this: each removal can take down a peer that
+     * another handle is still using. To avoid that, we add ONE 100 kHz
+     * device per address, and we never re-add a body part here — if a
+     * body handle dropped out, only a re-probe of the cached handle
+     * restores it, and that is what the body task does at the next
+     * touch poll. */
     for (uint8_t addr = 0x08; addr < 0x78; addr++) {
         i2c_master_dev_handle_t dev;
         i2c_device_config_t cfg = {
@@ -568,37 +570,19 @@ int muse_body_scan(char *out, size_t cap)
             }
         }
     }
-    /* Removing and re-adding devices around the body's own handles can
-     * confuse the bus driver: the next probe of 0x6F or 0x68 may fail
-     * because the bus dropped them. Re-probe those two to restore the
-     * handles our module cached. */
-    if (s_exp == NULL) {
-        i2c_device_config_t cfg = {
-            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-            .device_address = EXP_ADDR,
-            .scl_speed_hz = 100000,
-        };
-        if (i2c_master_bus_add_device(bus, &cfg, &s_exp) == ESP_OK) {
-            uint8_t uid = 0, ver = 0;
-            if (exp_read8(EXP_REG_UID_L, &uid) != ESP_OK || exp_read8(EXP_REG_VERSION, &ver) != ESP_OK) {
-                i2c_master_bus_rm_device(s_exp);
-                s_exp = NULL;
-            }
+    /* The scan tends to leave the body's two handles in a state where
+     * the next I/O fails. Send the head a few warm-up reads (cheap on
+     * the I2C bus, restores the bus driver's view) so the user's
+     * next `>body` reports a real answer instead of a stale false. */
+    if (s_exp) {
+        uint8_t uid = 0, ver = 0;
+        if (exp_read8(EXP_REG_UID_L, &uid) == ESP_OK && exp_read8(EXP_REG_VERSION, &ver) == ESP_OK) {
+            /* the bus is back, all good */
         }
     }
-    if (s_touch_dev == NULL) {
-        i2c_device_config_t tcfg = {
-            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-            .device_address = TOUCH_ADDR,
-            .scl_speed_hz = 100000,
-        };
-        if (i2c_master_bus_add_device(bus, &tcfg, &s_touch_dev) == ESP_OK) {
-            uint8_t probe = 0;
-            if (touch_read8(SI12T_OUTPUT1, &probe) != ESP_OK) {
-                i2c_master_bus_rm_device(s_touch_dev);
-                s_touch_dev = NULL;
-            }
-        }
+    if (s_touch_dev) {
+        uint8_t probe = 0;
+        touch_read8(SI12T_OUTPUT1, &probe);
     }
     return n;
 }
