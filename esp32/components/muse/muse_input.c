@@ -827,6 +827,19 @@ static bool console_command(char *line, bool whole)
         fflush(stdout);
         return true;
     }
+    if (!strcmp(line, "body.read")) {
+        char r[320];
+        muse_body_read(r, sizeof r);
+        printf("@body.read %s\n", r);
+        fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "body.loop")) {
+        bool ok = muse_body_loopback();
+        printf("@body.loop {\"ok\":%s}\n", ok ? "true" : "false");
+        fflush(stdout);
+        return true;
+    }
     if (!strcmp(line, "body.tap")) {
         /* The head panel's press, without a hand: exercises wake and hush. */
         muse_input_touch_press();

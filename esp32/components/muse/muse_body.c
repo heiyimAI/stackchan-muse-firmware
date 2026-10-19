@@ -227,10 +227,16 @@ static void scs_frame(uint8_t id, uint8_t addr, const uint8_t *data, int len)
     uart_write_bytes(SERVO_UART, f, (size_t)(7 + len));
 }
 
-/* Sends a write and takes the servo's six-byte answer as proof it heard. */
+/* Sends a write and takes the servo's answer:
+ *     FF FF id len err chk           (len = 2 for a write)
+ * `err` is the servo's own status byte and is worth logging: 0x01 voltage,
+ * 0x02 instruction, 0x04 checksum, 0x08 overheat, 0x10 angle limit,
+ * 0x20 overload. Note the reply has SIX bytes: the status is reply[4], not
+ * reply[3] (which is always the length, 2). */
 static bool scs_write(uint8_t id, uint8_t addr, const uint8_t *data, int len)
 {
     bool ok = false;
+    static uint8_t last_err[3] = { 0, 0, 0 };
     if (!s_servos || !s_scs_lock) {
         return false;
     }
@@ -239,10 +245,77 @@ static bool scs_write(uint8_t id, uint8_t addr, const uint8_t *data, int len)
         scs_frame(id, addr, data, len);
         uint8_t reply[6];
         int n = uart_read_bytes(SERVO_UART, reply, sizeof reply, pdMS_TO_TICKS(20));
-        ok = n >= 2 && reply[0] == 0xFF && reply[1] == 0xFF;
+        ok = n >= 6 && reply[0] == 0xFF && reply[1] == 0xFF;
+        if (ok && id < 3) {
+            uint8_t err = reply[4];
+            if (err != last_err[id]) {
+                ESP_LOGW(TAG, "servo id %d reg 0x%02x status 0x%02x", id, addr, err);
+                last_err[id] = err;
+            }
+            ok = err == 0;
+        }
         xSemaphoreGive(s_scs_lock);
     }
     return ok;
+}
+
+/* One READ: FF FF id 04 02 addr n chk, answered by
+ *     FF FF id (n+2) err data… chk
+ * Returns n, or -1. *status gets the servo's error byte, which is what the
+ * firmware needs to tell "not moving" from "not listening". */
+static int scs_read(uint8_t id, uint8_t addr, uint8_t *data, int n, uint8_t *status)
+{
+    if (!s_servos || !s_scs_lock || n <= 0 || n > 8) {
+        return -1;
+    }
+    int got = -1;
+    if (xSemaphoreTake(s_scs_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        uart_flush_input(SERVO_UART);
+        uint8_t f[8] = { 0xFF, 0xFF, id, 4, 0x02, addr, (uint8_t)n, 0 };
+        uint8_t sum = 0;
+        for (int i = 2; i < 7; i++) {
+            sum += f[i];
+        }
+        f[7] = (uint8_t)~sum;
+        uart_write_bytes(SERVO_UART, f, sizeof f);
+        uint8_t h[5];
+        int hn = uart_read_bytes(SERVO_UART, h, sizeof h, pdMS_TO_TICKS(20));
+        if (hn == (int)sizeof h && h[0] == 0xFF && h[1] == 0xFF &&
+            h[3] == (uint8_t)(n + 2)) {
+            *status = h[4];
+            int dn = uart_read_bytes(SERVO_UART, data, (size_t)n, pdMS_TO_TICKS(20));
+            if (dn == n) {
+                got = n;
+            }
+        }
+        xSemaphoreGive(s_scs_lock);
+    }
+    return got;
+}
+
+/* One line per servo: what it says about itself. */
+int muse_body_read(char *out, size_t cap)
+{
+    int n = 0;
+    static const char *names[] = { "", "yaw", "pitch" };
+    for (uint8_t id = 1; id <= 2; id++) {
+        uint8_t torque = 0xFF, pos[2] = { 0xFF, 0xFF }, moving = 0xFF, voltage = 0xFF, temp = 0xFF;
+        uint8_t st = 0xFF;
+        int got = 0;
+        if (scs_read(id, SCS_TORQUE_ENABLE, &torque, 1, &st) == 1) got++;
+        if (scs_read(id, 56, pos, 2, &st) == 2) got++;
+        if (scs_read(id, 66, &moving, 1, &st) == 1) got++;
+        if (scs_read(id, 62, &voltage, 1, &st) == 1) got++;
+        if (scs_read(id, 63, &temp, 1, &st) == 1) got++;
+        /* Big-endian on the wire: SCSCL sets End = 1, so byte 0 is the high
+         * half. Reading it the other way turned 1002 into 59907. */
+        int position = (pos[0] << 8) | pos[1];
+        n += snprintf(out + n, cap - (size_t)n,
+                      "%s%s: torque %d, pos %d, moving %d, %.1f V, %d C, status 0x%02x (%d/5 reads)",
+                      n ? " " : "", names[id], torque, position, moving,
+                      voltage == 0xFF ? -1 : voltage * 0.1, temp, st, got);
+    }
+    return n;
 }
 
 static int clamp_int(int v, int lo, int hi)
@@ -256,27 +329,98 @@ static int angle_to_raw(int tenths, int zero)
     return zero + tenths * 32 / 100;
 }
 
-static bool servo_move(int yaw_tenths, int pitch_tenths, uint16_t move_ms)
+/*
+ * Motion, the way the factory drives it: hold a target and stream 20 ms
+ * steps towards it. A servo that ignores a single "go there" write still
+ * follows a stream, and this is exactly the factory's own loop (its spring
+ * animation writes one small increment every 20 ms with time = 20).
+ */
+#define SERVO_STEP_RAW 12      /* ~3.75 deg a tick, about 190 deg/s */
+
+static int s_yaw_raw = -1;     /* what the servo was last told, in raw steps */
+static int s_pitch_raw = -1;
+static int s_yaw_target = 0;
+static int s_pitch_target = 0;
+static volatile bool s_driving;   /* motion_drive() owns the step; the task waits */
+
+static void servo_target(int yaw_tenths, int pitch_tenths)
 {
     yaw_tenths = clamp_int(yaw_tenths, YAW_MIN, YAW_MAX);
     pitch_tenths = clamp_int(pitch_tenths, PITCH_MIN, PITCH_MAX);
-    uint8_t yaw[6], pitch[6];
-    int yraw = clamp_int(angle_to_raw(yaw_tenths, s_zero_yaw), RAW_MIN, RAW_MAX);
-    int praw = clamp_int(angle_to_raw(pitch_tenths, s_zero_pitch), RAW_MIN, RAW_MAX);
-    for (int i = 0; i < 2; i++) {
-        uint16_t ms = move_ms;
-        yaw[i] = i == 0 ? (uint8_t)(yraw & 0xFF) : (uint8_t)(yraw >> 8);
-        yaw[2 + i] = i == 0 ? (uint8_t)(ms & 0xFF) : (uint8_t)(ms >> 8);
-        yaw[4 + i] = 0;   /* speed 0: the move time is what counts */
-        pitch[i] = i == 0 ? (uint8_t)(praw & 0xFF) : (uint8_t)(praw >> 8);
-        pitch[2 + i] = i == 0 ? (uint8_t)(ms & 0xFF) : (uint8_t)(ms >> 8);
-        pitch[4 + i] = 0;
-    }
-    bool y = scs_write(YAW_ID, SCS_GOAL_POSITION, yaw, sizeof yaw);
-    bool p = scs_write(PITCH_ID, SCS_GOAL_POSITION, pitch, sizeof pitch);
+    s_yaw_target = clamp_int(angle_to_raw(yaw_tenths, s_zero_yaw), RAW_MIN, RAW_MAX);
+    s_pitch_target = clamp_int(angle_to_raw(pitch_tenths, s_zero_pitch), RAW_MIN, RAW_MAX);
     s_goto_yaw = yaw_tenths;
     s_goto_pitch = pitch_tenths;
-    return y && p;
+}
+
+static int step_toward(int have, int want, int step)
+{
+    int d = want - have;
+    if (d > step) {
+        return have + step;
+    }
+    if (d < -step) {
+        return have - step;
+    }
+    return want;
+}
+
+/* Goal position, move time and speed, high byte first — the servo's own
+ * order (SCSCL's End = 1). Everything little-endian went to the bus as a
+ * byte-swapped number, which is why the servos never moved. */
+static void put_pos(uint8_t *b, int raw, uint16_t ms)
+{
+    b[0] = (uint8_t)(raw >> 8);
+    b[1] = (uint8_t)(raw & 0xFF);
+    b[2] = (uint8_t)(ms >> 8);
+    b[3] = (uint8_t)(ms & 0xFF);
+    b[4] = 0;   /* speed 0: the move time is what counts */
+    b[5] = 0;
+}
+
+static bool motion_settled(void)
+{
+    return s_yaw_raw >= 0 && s_yaw_raw == s_yaw_target && s_pitch_raw == s_pitch_target;
+}
+
+/* One 20 ms tick: advance both axes and tell the servos that moved. */
+static void motion_step(void)
+{
+    if (!s_servos) {
+        return;
+    }
+    if (s_yaw_raw < 0) {
+        s_yaw_raw = s_yaw_target;   /* nothing read at boot: start from the target */
+        s_pitch_raw = s_pitch_target;
+        return;
+    }
+    int y = step_toward(s_yaw_raw, s_yaw_target, SERVO_STEP_RAW);
+    int p = step_toward(s_pitch_raw, s_pitch_target, SERVO_STEP_RAW);
+    uint8_t b[6];
+    if (y != s_yaw_raw) {
+        put_pos(b, y, 20);
+        scs_write(YAW_ID, SCS_GOAL_POSITION, b, sizeof b);
+        s_yaw_raw = y;
+    }
+    if (p != s_pitch_raw) {
+        put_pos(b, p, 20);
+        scs_write(PITCH_ID, SCS_GOAL_POSITION, b, sizeof b);
+        s_pitch_raw = p;
+    }
+}
+
+/* Runs the current target to completion, or until the budget is spent.
+ * Callable from any task: it drives the bus itself rather than waiting for
+ * the body task. */
+static void motion_drive(int budget_ms)
+{
+    int64_t end = esp_timer_get_time() + (int64_t)budget_ms * 1000;
+    s_driving = true;
+    while (!motion_settled() && esp_timer_get_time() < end) {
+        motion_step();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    s_driving = false;
 }
 
 /* ----------------------------------------------------------------- LEDs -- */
@@ -374,28 +518,33 @@ static void motion_tick(int64_t now)
         s_pose_dirty = false;
         switch (pose) {
         case MUSE_BODY_POSE_THINK:
-            servo_move(THINK_YAW, THINK_PITCH, THINK_MS);
-            return;
+            servo_target(THINK_YAW, THINK_PITCH);
+            break;
         case MUSE_BODY_POSE_SPEAK:
-            servo_move(SPEAK_YAW, SPEAK_PITCH, SPEAK_SWAY_MS);
-            return;
+            servo_target(SPEAK_YAW, SPEAK_PITCH);
+            break;
         default:
-            servo_move(IDLE_YAW, IDLE_PITCH, 500);
-            return;
+            servo_target(IDLE_YAW, IDLE_PITCH);
+            break;
         }
     }
     if (pose == MUSE_BODY_POSE_THINK) {
         if (s_phase == 0 && now - s_pose_us > THINK2_AFTER_MS * 1000LL) {
             s_phase = 1;
-            servo_move(THINK2_YAW, THINK2_PITCH, 700);
+            servo_target(THINK2_YAW, THINK2_PITCH);
         }
     } else if (pose == MUSE_BODY_POSE_SPEAK) {
         if (now - s_pose_us > SPEAK_SWAY_MS * 1000LL) {
             s_pose_us = now;
             s_phase ^= 1;
-            servo_move(s_phase ? SPEAK_YAW2 : SPEAK_YAW,
-                       s_phase ? SPEAK_PITCH2 : SPEAK_PITCH, SPEAK_SWAY_MS);
+            servo_target(s_phase ? SPEAK_YAW2 : SPEAK_YAW,
+                         s_phase ? SPEAK_PITCH2 : SPEAK_PITCH);
         }
+    }
+    /* One 20 ms increment, as the factory does — unless a caller is already
+     * driving the same two counters from its own task. */
+    if (!s_driving) {
+        motion_step();
     }
 }
 
@@ -476,11 +625,12 @@ void muse_body_pre_listen(void)
     if (!s_servos) {
         return;
     }
-    /* The servo is told directly, here, so the move is under way before the
-     * caller waits — then the motors are still when the microphone opens. */
+    /* Drive the perk from here — the caller is the voice task or the body
+     * task itself — so the motors are still by the time recording starts. */
     s_frozen = false;
-    servo_move(PERK_YAW, PERK_PITCH, PERK_MS);
-    vTaskDelay(pdMS_TO_TICKS(PRE_LISTEN_SETTLE_MS));
+    servo_target(PERK_YAW, PERK_PITCH);
+    motion_drive(PERK_MS + 200);
+    vTaskDelay(pdMS_TO_TICKS(PRE_LISTEN_SETTLE_MS / 2));
     s_pose = MUSE_BODY_POSE_LISTEN;
     s_frozen = true;
     s_pose_dirty = false;
@@ -493,7 +643,34 @@ bool muse_body_move(int yaw_tenths, int pitch_tenths)
         return false;
     }
     s_frozen = true;   /* a bench move holds until a pose is set again */
-    return servo_move(yaw_tenths, pitch_tenths, 400);
+    servo_target(yaw_tenths, pitch_tenths);
+    motion_drive(2000);
+    return motion_settled();
+}
+
+/*
+ * Loopback test: route the UART's RX to its own TX line so every byte the
+ * engine writes is read back. A pass proves the UART controller, the baud
+ * rate, the pins, and the TX half are all working on the CoreS3 side; a
+ * fail (or empty read) means the body is the limit. Does not need a servo.
+ */
+bool muse_body_loopback(void)
+{
+    if (!s_servos) {
+        return false;
+    }
+    if (xSemaphoreTake(s_scs_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        uart_flush_input(SERVO_UART);
+        const char *msg = "PING-FOR-LOOPBACK-1234";
+        uart_write_bytes(SERVO_UART, msg, strlen(msg));
+        uint8_t back[32];
+        int n = uart_read_bytes(SERVO_UART, back, sizeof back, pdMS_TO_TICKS(50));
+        bool ok = (n == (int)strlen(msg) && memcmp(back, msg, strlen(msg)) == 0);
+        ESP_LOGI(TAG, "loopback: wrote %u, read %d %s", (unsigned)strlen(msg), n, ok ? "OK" : "mismatch");
+        xSemaphoreGive(s_scs_lock);
+        return ok;
+    }
+    return false;
 }
 
 void muse_body_leds(uint8_t r, uint8_t g, uint8_t b)
@@ -724,7 +901,23 @@ bool muse_body_start(void)
     s_zero_pitch = clamp_int(s_zero_pitch, RAW_MIN, RAW_MAX);
     if (s_servos) {
         ESP_LOGI(TAG, "servos: zero yaw %d, pitch %d", s_zero_yaw, s_zero_pitch);
-        servo_move(IDLE_YAW, IDLE_PITCH, 600);
+        /* Where is the head? The factory reads it too and starts from there. */
+        for (uint8_t id = 1; id <= 2; id++) {
+            uint8_t pos[2], st = 0;
+            if (scs_read(id, 56, pos, 2, &st) == 2) {
+                int raw = (pos[0] << 8) | pos[1];   /* high byte first */
+                if (id == YAW_ID) {
+                    s_yaw_raw = raw;
+                } else {
+                    s_pitch_raw = raw;
+                }
+                ESP_LOGI(TAG, "servo %d present position %d (status 0x%02x)", id, raw, st);
+            } else {
+                ESP_LOGW(TAG, "servo %d did not report its position", id);
+            }
+        }
+        servo_target(IDLE_YAW, IDLE_PITCH);
+        motion_drive(1200);
     }
 
     /* One task for the whole body: touch, LEDs and motion. */

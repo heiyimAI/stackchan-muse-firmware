@@ -66,6 +66,16 @@ bool muse_body_zero(int yaw_raw, int pitch_raw);
  * 7 = least). False if the value is out of range or no head panel answered. */
 bool muse_body_set_sens(int level);
 
+/* Bench-only: writes a test string to the servo UART and reads it back from
+ * the TX line itself. True if every byte comes back identical — i.e. the
+ * UART controller and the 1 Mbps timing are good on this board. */
+bool muse_body_loopback(void);
+
+/* What the two servos say about themselves — torque, position, moving,
+ * voltage, temperature — as one line, for the console. This is the only
+ * way to tell "not moving" from "not listening". */
+int muse_body_read(char *out, size_t cap);
+
 /* One line of JSON for the console: what answered, where the head is, what
  * the head panel sees. Returns the length written. */
 int muse_body_status(char *out, size_t cap);
