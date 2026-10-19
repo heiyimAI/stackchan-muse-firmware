@@ -135,6 +135,11 @@ static int s_zero_pitch = PITCH_ZERO_DEFAULT;
 
 static muse_touch_t s_touch;
 static uint8_t s_touch_last[3];
+/* The highest intensity each zone showed since the last >body.peak read. A
+ * finger crosses the panel's threshold for a couple of 50 ms polls; reading
+ * the instantaneous value misses most of them, and the peak is what says
+ * whether a level is sensitive enough. */
+static volatile uint8_t s_touch_peak[3];
 static volatile int64_t s_flash_until_us;
 
 static volatile int s_pose;
@@ -562,6 +567,11 @@ static void touch_poll(void)
         (uint8_t)((raw >> 4) & 0x03),
     };
     memcpy(s_touch_last, intensity, sizeof s_touch_last);
+    for (int i = 0; i < 3; i++) {
+        if (intensity[i] > s_touch_peak[i]) {
+            s_touch_peak[i] = intensity[i];
+        }
+    }
     switch (muse_touch_step(&s_touch, intensity)) {
     case MUSE_TOUCH_PRESS:
         s_flash_until_us = esp_timer_get_time() + 100000;
@@ -778,6 +788,13 @@ bool muse_body_set_sens(int level)
     s_sens = level;
     ESP_LOGI(TAG, "touch sensitivity set to %d (nibble 0x%02x)", level, nibble);
     return true;
+}
+
+int muse_body_touch_peak(char *out, size_t cap)
+{
+    uint8_t p[3] = { s_touch_peak[0], s_touch_peak[1], s_touch_peak[2] };
+    s_touch_peak[0] = s_touch_peak[1] = s_touch_peak[2] = 0;
+    return snprintf(out, cap, "{\"peak\":[%u,%u,%u],\"sens\":%d}", p[0], p[1], p[2], s_sens);
 }
 
 int muse_body_status(char *out, size_t cap)

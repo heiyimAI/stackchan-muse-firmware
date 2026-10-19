@@ -834,6 +834,13 @@ static bool console_command(char *line, bool whole)
         fflush(stdout);
         return true;
     }
+    if (!strcmp(line, "body.peak")) {
+        char r[128];
+        muse_body_touch_peak(r, sizeof r);
+        printf("@body.peak %s\n", r);
+        fflush(stdout);
+        return true;
+    }
     if (!strcmp(line, "body.loop")) {
         bool ok = muse_body_loopback();
         printf("@body.loop {\"ok\":%s}\n", ok ? "true" : "false");

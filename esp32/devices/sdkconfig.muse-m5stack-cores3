@@ -58,3 +58,4 @@ CONFIG_BSP_LCD_DRAW_BUF_DOUBLE=y
 # one exists; models are packed into srmodels.bin and flashed to the "model"
 # partition (partitions_muse.csv). Swap = change this symbol + rebuild.
 CONFIG_SR_WN_WN9_HEYIVY_TTS2=y
+CONFIG_MUSE_BODY_TOUCH_SENS=2

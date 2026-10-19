@@ -43,6 +43,21 @@ static muse_touch_t make(void)
     return t;
 }
 
+/* A finger lifting: the panel reports nothing for RELEASE_FRAMES polls
+ * before the gesture machine counts the touch as over. */
+static muse_touch_gesture_t lift(muse_touch_t *t)
+{
+    const uint8_t none[3] = { 0, 0, 0 };
+    muse_touch_gesture_t g = MUSE_TOUCH_NONE;
+    for (int i = 0; i < 4; i++) {
+        g = muse_touch_step(t, none);
+        if (i < 3 && g != MUSE_TOUCH_NONE) {
+            return (muse_touch_gesture_t)-1;   /* released too early */
+        }
+    }
+    return g;
+}
+
 /* A tap: press on contact, release when the finger lifts, nothing in between. */
 static void test_tap(void)
 {
@@ -52,7 +67,7 @@ static void test_tap(void)
     expect(muse_touch_step(&t, none) == MUSE_TOUCH_NONE, "tap: untouched is quiet");
     expect(muse_touch_step(&t, centre) == MUSE_TOUCH_PRESS, "tap: contact is a press");
     expect(muse_touch_step(&t, centre) == MUSE_TOUCH_NONE, "tap: holding is quiet");
-    expect(muse_touch_step(&t, none) == MUSE_TOUCH_RELEASE, "tap: lifting is a release");
+    expect(lift(&t) == MUSE_TOUCH_RELEASE, "tap: lifting is a release");
     expect(muse_touch_step(&t, none) == MUSE_TOUCH_NONE, "tap: and then quiet again");
 }
 
@@ -62,11 +77,10 @@ static void test_swipe_forward(void)
     muse_touch_t t = make();
     const uint8_t centre[3] = { 0, 3, 0 };   /* position 0 */
     const uint8_t right[3] = { 0, 0, 3 };    /* position +100 */
-    const uint8_t none[3] = { 0, 0, 0 };
     expect(muse_touch_step(&t, centre) == MUSE_TOUCH_PRESS, "fwd: press at centre");
     expect(muse_touch_step(&t, right) == MUSE_TOUCH_SWIPE_FWD, "fwd: +100 is a swipe");
     expect(muse_touch_step(&t, right) == MUSE_TOUCH_NONE, "fwd: one swipe per touch");
-    expect(muse_touch_step(&t, none) == MUSE_TOUCH_RELEASE, "fwd: lift ends it");
+    expect(lift(&t) == MUSE_TOUCH_RELEASE, "fwd: lift ends it");
 }
 
 /* The other way: from the right zone to the left one. */
@@ -102,6 +116,22 @@ static void test_threshold(void)
     expect(muse_touch_step(&t, past) == MUSE_TOUCH_SWIPE_BACK, "edge: -66 is over it");
 }
 
+/* A light finger: the panel drops out for a poll and finds it again. That is
+ * still one touch — no second press, no release, so no hush. */
+static void test_flicker(void)
+{
+    muse_touch_t t = make();
+    const uint8_t light[3] = { 0, 1, 0 };
+    const uint8_t none[3] = { 0, 0, 0 };
+    expect(muse_touch_step(&t, light) == MUSE_TOUCH_PRESS, "flicker: press");
+    expect(muse_touch_step(&t, none) == MUSE_TOUCH_NONE, "flicker: gap is not a lift");
+    expect(muse_touch_step(&t, light) == MUSE_TOUCH_NONE, "flicker: back is not a new press");
+    expect(muse_touch_step(&t, none) == MUSE_TOUCH_NONE, "flicker: another gap");
+    expect(muse_touch_step(&t, none) == MUSE_TOUCH_NONE, "flicker: still under four");
+    expect(muse_touch_step(&t, none) == MUSE_TOUCH_NONE, "flicker: three");
+    expect(muse_touch_step(&t, none) == MUSE_TOUCH_RELEASE, "flicker: four silent polls end it");
+}
+
 /* The position itself: the three zones as one number. */
 static void test_position(void)
 {
@@ -125,6 +155,7 @@ int main(void)
     test_swipe_forward();
     test_swipe_back();
     test_hold();
+    test_flicker();
     test_threshold();
     test_position();
     if (failures) {

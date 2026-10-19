@@ -41,10 +41,12 @@ typedef enum {
 typedef struct {
     /* configuration */
     int swipe_threshold;   /* how far the position must move, of ±100 */
+    int release_frames;    /* polls with no finger before the touch is over */
 
     /* state */
     int state;             /* 0 idle, 1 touched, 2 swiping */
     int start_pos;
+    int up_run;            /* consecutive polls with no finger, for release */
 } muse_touch_t;
 
 void muse_touch_reset(muse_touch_t *t, int swipe_threshold);

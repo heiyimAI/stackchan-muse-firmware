@@ -20,11 +20,20 @@
 #define TOUCH_DOWN 1
 #define TOUCH_SWIPING 2
 
+/* A light finger does not hold an intensity of 1 steadily: the panel drops to
+ * 0 for a poll or two and picks the finger back up. Taking that as a lift
+ * ended the gesture and made the next sample a *new* press — which, once a
+ * turn was listening, hushed it, so every touch started a turn and then
+ * immediately threw it away. Four polls of nothing (200 ms) is the release. */
+#define TOUCH_RELEASE_FRAMES 4
+
 void muse_touch_reset(muse_touch_t *t, int swipe_threshold)
 {
     t->swipe_threshold = swipe_threshold > 0 ? swipe_threshold : 40;
+    t->release_frames = TOUCH_RELEASE_FRAMES;
     t->state = TOUCH_IDLE;
     t->start_pos = 0;
+    t->up_run = 0;
 }
 
 bool muse_touch_down(const uint8_t intensity[3])
@@ -50,15 +59,21 @@ muse_touch_gesture_t muse_touch_step(muse_touch_t *t, const uint8_t intensity[3]
         if (down) {
             t->state = TOUCH_DOWN;
             t->start_pos = muse_touch_position(intensity);
+            t->up_run = 0;
             return MUSE_TOUCH_PRESS;
         }
         return MUSE_TOUCH_NONE;
 
     case TOUCH_DOWN:
         if (!down) {
+            if (++t->up_run < t->release_frames) {
+                return MUSE_TOUCH_NONE;   /* a gap in a finger, not a lift */
+            }
             t->state = TOUCH_IDLE;
+            t->up_run = 0;
             return MUSE_TOUCH_RELEASE;
         }
+        t->up_run = 0;
         if (muse_touch_position(intensity) - t->start_pos > t->swipe_threshold) {
             t->state = TOUCH_SWIPING;
             return MUSE_TOUCH_SWIPE_FWD;
@@ -71,9 +86,14 @@ muse_touch_gesture_t muse_touch_step(muse_touch_t *t, const uint8_t intensity[3]
 
     default:   /* TOUCH_SWIPING: wait for the finger to lift */
         if (!down) {
+            if (++t->up_run < t->release_frames) {
+                return MUSE_TOUCH_NONE;
+            }
             t->state = TOUCH_IDLE;
+            t->up_run = 0;
             return MUSE_TOUCH_RELEASE;
         }
+        t->up_run = 0;
         return MUSE_TOUCH_NONE;
     }
 }

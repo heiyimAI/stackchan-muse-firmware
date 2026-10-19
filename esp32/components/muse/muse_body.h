@@ -76,6 +76,11 @@ bool muse_body_loopback(void);
  * way to tell "not moving" from "not listening". */
 int muse_body_read(char *out, size_t cap);
 
+/* The highest intensity each zone showed since the last call, and clears the
+ * latch. A tap lasts a couple of 50 ms polls; one sample misses most of them,
+ * so this is what tells a light touch from no touch. */
+int muse_body_touch_peak(char *out, size_t cap);
+
 /* One line of JSON for the console: what answered, where the head is, what
  * the head panel sees. Returns the length written. */
 int muse_body_status(char *out, size_t cap);
